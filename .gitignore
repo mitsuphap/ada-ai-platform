@@ -1,5 +1,27 @@
-# Ignore Python virtual environments
+# ============================
+# ENVIRONMENT FILES
+# ============================
+.env
+*.env
+*/.env
+Implementation/backend/.env
+
+# ============================
+# PYTHON VIRTUAL ENVIRONMENTS
+# ============================
 .venv/
 venv/
 */.venv/
 */venv/
+
+# ============================
+# NODE MODULES (for your frontend)
+# ============================
+node_modules/
+*/node_modules/
+
+# ============================
+# PYTHON CACHE FILES
+# ============================
+__pycache__/
+*.pyc
