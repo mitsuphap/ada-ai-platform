@@ -1,0 +1,3 @@
+# This file ensures the output directory exists in git
+# Docker requires this directory to exist before mounting volumes on Windows
+
