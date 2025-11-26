@@ -13,18 +13,28 @@ import time
 from pathlib import Path
 from typing import Dict, Any, List, Optional
 from bs4 import BeautifulSoup
+from dotenv import load_dotenv
 
 import requests
 import google.generativeai as genai
+
+# Load environment variables from .env file if it exists (for local dev)
+# In Docker, environment variables are set by docker-compose, so this is optional
+try:
+    load_dotenv()
+except:
+    pass  # If .env doesn't exist, rely on environment variables from docker-compose
 
 SEEDS_PATH_DEFAULT = "chosen_seeds.ndjson"
 OUTPUT_PATH_DEFAULT = "discovered_sites.ndjson"
 API_KEY = os.getenv("GOOGLE_CSE_API_KEY")
 CX = os.getenv("GOOGLE_CSE_CX")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
+if not GEMINI_API_KEY:
+    raise ValueError("GEMINI_API_KEY environment variable is not set. Check docker-compose.yml and .env file.")
 
-
-genai.configure(api_key=API_KEY)
+genai.configure(api_key=GEMINI_API_KEY)
 MODEL_NAME = "models/gemini-2.5-flash"
 
 MAX_HTML_CHARS = 30000
@@ -34,7 +44,7 @@ DEFAULT_HEADERS = {
 }
 
 
-PARSER_INSTRUCTIONS = PARSER_INSTRUCTIONS = """
+PARSER_INSTRUCTIONS = """
 You are a data extractor for a publishing intelligence platform.
 
 Task:
@@ -137,7 +147,7 @@ def strip_code_fence(text: str) -> str:
             t = t[: t.rfind("```")]
     return t.strip()
 
-def call_gemini_extract(html: str, url: str, label: str, title: str) -> List[Dict[str, Any]]:
+def call_gemini_extract(html: str, url: str, label: str, title: str, custom_instructions: Optional[str] = None) -> List[Dict[str, Any]]:
     # You can keep or remove JSON mode; this just increases chance of clean JSON
     model = genai.GenerativeModel(
         MODEL_NAME,
@@ -148,7 +158,10 @@ def call_gemini_extract(html: str, url: str, label: str, title: str) -> List[Dic
 
     html_snippet = prepare_html_for_llm(html)  # or html[:MAX_HTML_CHARS]
 
-    prompt = f"""{PARSER_INSTRUCTIONS}
+    # Use custom instructions if provided, otherwise use default
+    parser_instructions = custom_instructions if custom_instructions else PARSER_INSTRUCTIONS
+
+    prompt = f"""{parser_instructions}
 
     Extra context:
     - URL: {url}
@@ -265,7 +278,8 @@ def call_gemini_extract(html: str, url: str, label: str, title: str) -> List[Dic
 def llm_scrape_from_seeds(
     seeds_path: str = SEEDS_PATH_DEFAULT,
     output_path: str = OUTPUT_PATH_DEFAULT,
-    delay_seconds: float = 1.0
+    delay_seconds: float = 1.0,
+    custom_parser_instructions: Optional[str] = None
 ) -> None:
     seeds = load_ndjson(seeds_path)
     print(f"Loaded {len(seeds)} seeds from {seeds_path}")
@@ -294,7 +308,7 @@ def llm_scrape_from_seeds(
                 continue
 
             print(f"[LLM] Extracting structured data for {url} ...")
-            extracted_entities = call_gemini_extract(html, url=url, label=label, title=title)
+            extracted_entities = call_gemini_extract(html, url=url, label=label, title=title, custom_instructions=custom_parser_instructions)
 
             for ent in extracted_entities:
                 record = {

@@ -4,13 +4,22 @@ import json
 import requests
 from datetime import datetime, timezone
 from pathlib import Path
+from dotenv import load_dotenv
 import google.generativeai as genai
 
-API_KEY = os.getenv("GOOGLE_CSE_API_KEY")
-if not API_KEY:
-    raise RuntimeError("GOOGLE_CSE_API_KEY is not set in the environment.")
+# Load environment variables from .env file if it exists (for local dev)
+# In Docker, environment variables are set by docker-compose, so this is optional
+try:
+    load_dotenv()
+except:
+    pass  # If .env doesn't exist, rely on environment variables from docker-compose
 
-genai.configure(api_key=API_KEY)
+API_KEY = os.getenv("GOOGLE_CSE_API_KEY")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+if not GEMINI_API_KEY:
+    raise RuntimeError("GEMINI_API_KEY is not set in the environment. Check docker-compose.yml and .env file.")
+
+genai.configure(api_key=GEMINI_API_KEY)
 model = genai.GenerativeModel("models/gemini-2.5-flash")
 LABELS = [
     "press_directory",

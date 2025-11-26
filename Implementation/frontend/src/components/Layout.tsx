@@ -22,8 +22,24 @@ export default function Layout({ children }: LayoutProps) {
                 Unified visibility for publishing data pipelines and exploration.
               </p>
             </div>
-            <div className="text-xs sm:text-sm text-white/80 font-medium md:text-right">
-              Real-time schema awareness • Secure API oversight
+            <div className="flex flex-col sm:flex-row items-start sm:items-center gap-4">
+              <div className="flex gap-4">
+                <Link
+                  to="/"
+                  className="text-xs sm:text-sm text-white/90 hover:text-white font-medium transition-colors"
+                >
+                  Dashboard
+                </Link>
+                <Link
+                  to="/scraper"
+                  className="text-xs sm:text-sm text-white/90 hover:text-white font-medium transition-colors"
+                >
+                  Scraper
+                </Link>
+              </div>
+              <div className="text-xs sm:text-sm text-white/80 font-medium md:text-right">
+                Real-time schema awareness • Secure API oversight
+              </div>
             </div>
           </div>
         </div>

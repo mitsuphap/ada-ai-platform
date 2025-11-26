@@ -78,9 +78,14 @@ services:
       DB_NAME: ${POSTGRES_DB:-ada_db}
       DB_USER: ${POSTGRES_USER:-ada}
       DB_PASS: ${POSTGRES_PASSWORD:-ada}
+      # Note: GEMINI_API_KEY and GOOGLE_CSE_CX are loaded from env_file
+      # GOOGLE_CSE_API_KEY needs to be added to Implementation/backend/.env file
+      # with the same value as GEMINI_API_KEY
     volumes:
       # optional: api can also see the raw json data if needed
       - ./Implementation/scraper/output:/data:ro
+      # Mount scraper source code so backend can import it
+      - ./Implementation/scraper:/app/scraper:ro
 
   adminer:
     image: adminer
