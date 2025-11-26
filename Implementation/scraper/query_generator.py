@@ -1,126 +1,94 @@
 import os
 import json
-from dotenv import load_dotenv
 import google.generativeai as genai
-
-# Load environment variables from .env file if it exists (for local dev)
-# In Docker, environment variables are set by docker-compose, so this is optional
-try:
-    load_dotenv()
-except:
-    pass  # If .env doesn't exist, rely on environment variables from docker-compose
 
 API_KEY = os.getenv("GOOGLE_CSE_API_KEY")
 CX = os.getenv("GOOGLE_CSE_CX")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-
-if not GEMINI_API_KEY:
-    raise ValueError("GEMINI_API_KEY environment variable is not set. Check docker-compose.yml and .env file.")
 
 genai.configure(api_key=GEMINI_API_KEY)
 model = genai.GenerativeModel("models/gemini-2.5-flash")
 
 
 
-def _extract_json_array(text: str) -> list[str]:
-    """
-    Try to extract a JSON array from Gemini's response text.
-    If parsing fails, return an empty list.
-    """
-    try:
-        # Sometimes the model might wrap JSON with extra text.
-        start = text.find("[")
-        end = text.rfind("]")
-        if start == -1 or end == -1 or end <= start:
-            return []
-        snippet = text[start : end + 1]
-        data = json.loads(snippet)
-        if isinstance(data, list):
-            # Keep only strings
-            return [q for q in data if isinstance(q, str)]
-    except Exception:
-        pass
-    return []
-
-
 def generate_queries_with_gemini(user_text: str, n: int = 5) -> list[str]:
     """
     Take one natural-language sentence and return a list of search queries.
+
     Example input:
-        "I want more poetry presses in Canada"
-    Output:
+        "I want gyms near Vancouver that are cheap"
+    Possible output:
         [
-          "poetry presses Canada submission guidelines",
-          "Canadian small poetry presses open submissions",
+          "cheap gym memberships Vancouver BC -reddit -blog -list -directory",
+          "24 hour fitness gym Vancouver membership price -top -best -review",
           ...
         ]
     """
+
     prompt = f"""
-                You are an expert search-query generator for a publishing data intelligence system.
+    You are an expert Google Search query generator for a general-purpose data
+    discovery system.
 
-Your job: expand a single user request (e.g., “I want horror agents in Canada”) into
-N high-quality Google Search queries that will return *direct* pages for a single
-press, magazine, or agent — NOT directories or lists.
+    Your job:
+    - Take a single user request (what they are looking for).
+    - Expand it into EXACTLY {n} high-quality Google Search queries.
 
-===========================
-RULES FOR QUERY GENERATION
-===========================
+    The goal:
+    - Find pages that are most likely to be useful for the user's request.
+    - Prefer official / primary sources when possible (e.g. the business/site itself,
+    the product page, the service page), unless the user explicitly wants reviews
+    or directories.
 
-1. Each query must be a short phrase suitable for Google Search.
-2. Always include any user hints about:
-   - genre (e.g., horror, romance, poetry)
-   - region (e.g., Canada, UK, US)
-3. STRICTLY avoid generating queries that lead to:
-   - directories ("literary agents list", "publisher directory")
-   - listicles (“top agents”, “best publishers 2025”)
-   - Reedsy resource pages
-   - JerichoWriters list pages
-   - WritersUnion directories
-   - Reddit, Medium, Substack, blog posts, advice articles
-   - any website that lists multiple agents/presses
-4. Queries should target SINGLE-ENTITY pages such as:
-   - agency homepages
-   - literary agent submission guidelines
-   - “contact us” pages
-   - “query guidelines” pages
-   - press submission guidelines
-   - magazine submission pages
-5. Prefer keywords that bias Google toward official pages:
-   - “literary agency”
-   - “literary agent”
-   - “publisher submissions”
-   - “magazine submissions”
-   - “query guidelines”
-   - “query email”
-   - “contact”
-   - “submissions”
-6. Use negative filters to avoid lists:
-   - `-list -directory -top -best -archive -blog -medium -reddit -substack -jerichowriters -reedsy`
-7. Queries must be distinct from one another.
-8. Output exactly N queries, one per line, no numbering, no bullets, no extra text.
+    User request:
+    "{user_text}"
 
-===========================
-OUTPUT FORMAT
-===========================
+    Rules for generating queries:
+    1. Each query must be a short phrase suitable for Google Search.
+    2. Always include any hints in the user request, such as:
+        - location (city, country, region)
+        - type of place (gym, restaurant, service, store, etc.)
+        - topic (e.g. geology jobs, data science bootcamps, student housing)
+    3. Prefer queries that lead to specific, high-value pages, for example:
+        - official websites
+        - product/service detail pages
+        - contact pages
+        - pricing/subscription pages
+    4. Unless the user explicitly wants lists/directories, try to avoid generic:
+        - “top X”, “best X”
+        - “list”, “directory”, “review sites”
+    5. You MAY use negative filters like:
+        - -reddit -blog -medium -substack -list -directory -top -best
+        BUT only if they make sense.
+    6. The {n} queries must be distinct, not tiny variations of each other.
+    7. Make the queries concrete and actionable, not just "gym Vancouver".
+        Prefer more specific phrasing that matches how people search.
 
-Return ONLY the list of queries.
-Do not explain them.
-Do not add JSON.
-Do not add commentary.
+    Output format (VERY IMPORTANT):
+    - Return a JSON array of EXACTLY {n} strings.
+    - Example: ["query 1", "query 2", "query 3"]
+    - No extra keys, no explanations, no comments, no markdown.
+    """
 
-One query per line. Nothing else."""
+    try:
+        resp = model.generate_content(prompt)
+        raw = (resp.text or "").strip()
 
+        # Since we forced application/json, resp.text should already be JSON
+        data = json.loads(raw)
 
-    resp = model.generate_content(prompt)
-    text = resp.text.strip()
-    queries = _extract_json_array(text)
+        # Keep only strings
+        queries = [q for q in data if isinstance(q, str)]
+
+    except Exception as e:
+        print(f"[ERROR] Failed to parse queries from Gemini: {e}")
+        queries = []
 
     # Very defensive fallback: if nothing parsed, just reuse the user text
     if not queries:
         queries = [user_text.strip()]
 
     # Deduplicate and strip
-    cleaned = []
+    cleaned: list[str] = []
     seen = set()
     for q in queries:
         q = q.strip()
