@@ -19,12 +19,11 @@ import google.generativeai as genai
 
 SEEDS_PATH_DEFAULT = "chosen_seeds.ndjson"
 OUTPUT_PATH_DEFAULT = "discovered_sites.ndjson"
-API_KEY = os.getenv("GOOGLE_CSE_API_KEY")
-CX = os.getenv("GOOGLE_CSE_CX")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
 
 
-genai.configure(api_key=API_KEY)
+genai.configure(api_key=GEMINI_API_KEY)
 MODEL_NAME = "models/gemini-2.5-flash"
 
 MAX_HTML_CHARS = 30000
