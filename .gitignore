@@ -6,13 +6,18 @@
 */.env
 Implementation/backend/.env
 
+
 # ============================
 # PYTHON VIRTUAL ENVIRONMENTS
 # ============================
+# Ignore Python virtual environments
 .venv/
 venv/
 */.venv/
 */venv/
+myvenv2/
+*/myvenv2/
+
 
 # ============================
 # NODE MODULES (for your frontend)
