@@ -9,14 +9,7 @@ from slowapi.errors import RateLimitExceeded
 from app.db import get_engine, get_db
 from app.auto_generator import auto_generate_all_routers, get_available_auto_tables
 
-# Import your existing manual routers
-from app.routers.publishers import router as publishers_router
-from app.routers.admin import router as admin_router
-from app.routers.metrics import router as metrics_router
-from app.routers.agents import router as agents_router
-from app.routers.magazines import router as magazines_router
-from app.routers.genres import router as genres_router
-from app.routers.search import router as search_router
+# Manual routers removed - using auto-generation only
 
 app = FastAPI(
     title="Automated Data Intelligence for Publishing & Beyond",
@@ -86,15 +79,6 @@ def list_auto_tables(db: Session = Depends(get_db)):
     """Return the list of auto-generated tables after exclusions"""
     tables = get_available_auto_tables(db)
     return {"tables": tables, "count": len(tables)}
-
-# register manual routes
-app.include_router(publishers_router) 
-app.include_router(admin_router)
-app.include_router(metrics_router)
-app.include_router(agents_router)
-app.include_router(magazines_router)
-app.include_router(genres_router)
-app.include_router(search_router)
 
 # Auto-generate routes for all tables
 @app.on_event("startup")
