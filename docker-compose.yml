@@ -1,0 +1,110 @@
+services:
+  db:
+    image: postgres:16
+    container_name: ada_db
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-ada}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-ada}
+      POSTGRES_DB: ${POSTGRES_DB:-ada_db}
+    ports:
+      - "5432:5432"
+    volumes:
+      # persistent PG data
+      - db_data:/var/lib/postgresql/data
+
+      # all schema / pipeline SQL - mount the actual db-init directory
+      - ./Implementation/backend/db/db-init:/docker-entrypoint-initdb.d:ro
+
+      # scraped json (shared directory) mounted read-only so db can see it if needed
+      - ./Implementation/scraper/output:/data:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-ada} -d ${POSTGRES_DB:-ada_db} || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  scraper:
+    build: ./Implementation/scraper
+    container_name: ada_scraper
+    depends_on:
+      db:
+        condition: service_healthy
+    volumes:
+      # scraper writes NDJSON here (bind-mounted to host)
+      - ./Implementation/scraper/output:/app/output
+
+  loader:
+    image: python:3.11-slim
+    container_name: ada_loader
+    profiles: ["pipeline"]
+    depends_on:
+      db:
+        condition: service_healthy
+      scraper:
+        condition: service_started
+    environment:
+      PGPASSWORD: ${POSTGRES_PASSWORD:-ada}
+      POSTGRES_USER: ${POSTGRES_USER:-ada}
+      POSTGRES_DB: ${POSTGRES_DB:-ada_db}
+    volumes:
+      # SQL scripts to run against db
+      - ./Implementation/backend/db/db-init:/db-init:ro
+
+      # shared output directory, mounted where SQL expects files
+      - ./Implementation/scraper/output:/data:ro
+    entrypoint: >
+      bash -c "
+        apt-get update -qq && apt-get install -y -qq postgresql-client dos2unix > /dev/null 2>&1 &&
+        dos2unix /db-init/load_data.sh 2>/dev/null || true &&
+        bash /db-init/load_data.sh &&
+        psql -h db -U ${POSTGRES_USER:-ada} -d ${POSTGRES_DB:-ada_db} -f /db-init/09_add_extracted_at.sql &&
+        psql -h db -U ${POSTGRES_USER:-ada} -d ${POSTGRES_DB:-ada_db} -f /db-init/06_validation_objects.sql &&
+        psql -h db -U ${POSTGRES_USER:-ada} -d ${POSTGRES_DB:-ada_db} -f /db-init/07_run_pipeline.sql
+      "
+    restart: "no"
+
+  api:
+    build: ./Implementation/backend
+    container_name: ada_api
+    env_file: ./Implementation/backend/.env
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "8000:8000"
+    environment:
+      DB_HOST: db
+      DB_PORT: 5432
+      DB_NAME: ${POSTGRES_DB:-ada_db}
+      DB_USER: ${POSTGRES_USER:-ada}
+      DB_PASS: ${POSTGRES_PASSWORD:-ada}
+    volumes:
+      # optional: api can also see the raw json data if needed
+      - ./Implementation/scraper/output:/data:ro
+
+  adminer:
+    image: adminer
+    container_name: ada_adminer
+    restart: always
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      ADMINER_DEFAULT_SERVER: db
+      ADMINER_DEFAULT_DB: ${POSTGRES_DB:-ada_db}
+    ports:
+      - "8080:8080"
+
+  orchestrator:
+    build: ./Implementation/orchestrator
+    container_name: ada_orchestrator
+    depends_on:
+      db:
+        condition: service_healthy
+    volumes:
+      # mount the docker socket so this container can call `docker compose`
+      - /var/run/docker.sock:/var/run/docker.sock
+    # no ports needed; it's a controller
+
+volumes:
+  db_data:
