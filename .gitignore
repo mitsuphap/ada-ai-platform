@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # Environment variables
 .env
 .env.local
@@ -52,3 +53,37 @@ logs/
 # Node modules (if any at root)
 node_modules/
 
+=======
+# ============================
+# ENVIRONMENT FILES
+# ============================
+.env
+*.env
+*/.env
+Implementation/backend/.env
+
+
+# ============================
+# PYTHON VIRTUAL ENVIRONMENTS
+# ============================
+# Ignore Python virtual environments
+.venv/
+venv/
+*/.venv/
+*/venv/
+myvenv2/
+*/myvenv2/
+
+
+# ============================
+# NODE MODULES (for your frontend)
+# ============================
+node_modules/
+*/node_modules/
+
+# ============================
+# PYTHON CACHE FILES
+# ============================
+__pycache__/
+*.pyc
+>>>>>>> f9aaa7b2e778fd0acde5ffce0e85bc73f645d815
