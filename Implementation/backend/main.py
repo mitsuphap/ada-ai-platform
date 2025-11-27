@@ -87,18 +87,7 @@ def list_auto_tables(db: Session = Depends(get_db)):
     tables = get_available_auto_tables(db)
     return {"tables": tables, "count": len(tables)}
 
-# Scraper API endpoints
-# Add scraper to path - handle both Docker (/app/scraper) and local dev (../scraper)
-scraper_path = Path(__file__).parent / "scraper"  # Docker: scraper is sibling to main.py
-if not scraper_path.exists():
-    scraper_path = Path(__file__).parent.parent / "scraper"  # Local dev: scraper is sibling to backend
-if scraper_path.exists():
-    sys.path.insert(0, str(scraper_path))
-
-# Output directory - mounted at /data in Docker, or use scraper/output locally
-OUTPUT_DIR = Path("/data") if Path("/data").exists() else Path(__file__).parent.parent / "scraper" / "output"
-OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-
+# Scraper API endpoints - Define models and routes FIRST, before path setup
 # Request/Response models
 class SearchRequest(BaseModel):
     topic: str
@@ -127,7 +116,28 @@ class ScrapeResponse(BaseModel):
     results: List[dict]
     message: str
 
-@app.post("/scraper/generate-search", response_model=SearchResponse)
+# Add scraper to path - handle both Docker (/app/scraper) and local dev (../scraper)
+scraper_path = Path("/app/scraper")  # Docker: scraper is mounted at /app/scraper
+if not scraper_path.exists():
+    scraper_path = Path(__file__).parent / "scraper"  # Try sibling to main.py
+if not scraper_path.exists():
+    scraper_path = Path(__file__).parent.parent / "scraper"  # Local dev: scraper is sibling to backend
+if scraper_path.exists():
+    sys.path.insert(0, str(scraper_path))
+    print(f"✅ Added scraper path to sys.path: {scraper_path}")
+else:
+    print(f"⚠️  Warning: Scraper path not found. Searched: /app/scraper, {Path(__file__).parent / 'scraper'}, {Path(__file__).parent.parent / 'scraper'}")
+
+# Output directory - mounted at /data in Docker, or use scraper/output locally
+OUTPUT_DIR = Path("/data") if Path("/data").exists() else Path(__file__).parent.parent / "scraper" / "output"
+OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+
+# Test route to verify registration works
+@app.get("/scraper/test")
+def test_scraper_route():
+    return {"message": "Scraper routes are working"}
+
+@app.post("/scraper/generate-search")
 def generate_and_search(request: SearchRequest, http_request: Request):
     """Step 1: Generate queries from topic and execute Google search, save to search_results_raw.ndjson"""
     try:
@@ -346,72 +356,6 @@ def scrape_selected_urls(request: LegacyScrapeRequest, http_request: Request):
         return ScrapeResponse(
             results=results,
             message=f"Scraped {len(results)} entities"
-        )
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-def scrape_selected_urls(request: ScrapeRequest, http_request: Request):
-    """Scrape selected URLs with custom data specification"""
-    try:
-        from llm_scrape_from_seeds import llm_scrape_from_seeds, PARSER_INSTRUCTIONS
-        
-        # Create seeds file from selected URLs
-        seeds = []
-        for url in request.urls:
-            seeds.append({
-                "url": url,
-                "label": "single_press_site",  # Default label
-                "title": url,
-                "source_query": "user_selected"
-            })
-        
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.ndjson', delete=False) as tmp_seeds:
-            seeds_path = tmp_seeds.name
-            for seed in seeds:
-                tmp_seeds.write(json.dumps(seed, ensure_ascii=False) + '\n')
-        
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.ndjson', delete=False) as tmp_output:
-            output_path = tmp_output.name
-        
-        # Build user_request from topic and data_specification for better context
-        user_request_parts = []
-        if request.topic:
-            user_request_parts.append(request.topic)
-        if request.data_specification:
-            user_request_parts.append(f"Focus on extracting: {request.data_specification}")
-        
-        if user_request_parts:
-            user_request = ". ".join(user_request_parts) + "."
-        else:
-            user_request = "Extract a general profile of each entity."
-        
-        # Modify PARSER_INSTRUCTIONS if data_specification provided
-        custom_instructions = None
-        if request.data_specification:
-            custom_instructions = PARSER_INSTRUCTIONS + f"\n\nIMPORTANT: The user specifically wants to extract: {request.data_specification}. Make sure to prioritize and extract this information prominently. If this information is not found on the page, set the relevant field(s) to null but ensure you thoroughly search for it."
-        
-        # Scrape with topic context
-        llm_scrape_from_seeds(
-            seeds_path=seeds_path,
-            output_path=output_path,
-            delay_seconds=1.0,
-            user_request=user_request,
-            custom_parser_instructions=custom_instructions
-        )
-        
-        # Load results
-        results = []
-        with open(output_path, 'r', encoding='utf-8') as f:
-            for line in f:
-                if line.strip():
-                    results.append(json.loads(line))
-        
-        # Clean up
-        os.unlink(seeds_path)
-        os.unlink(output_path)
-        
-        return ScrapeResponse(
-            results=results,
-            message=f"Successfully scraped {len(results)} entities"
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
