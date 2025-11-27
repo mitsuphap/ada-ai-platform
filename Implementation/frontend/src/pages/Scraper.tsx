@@ -103,18 +103,19 @@ export default function Scraper() {
     setScrapedData([])
 
     try {
-      const response = await api.post('/scraper/generate-search', {
+      // Use the automatic endpoint that does: search -> classify -> filter (confidence >= 0.95) -> scrape
+      const response = await api.post('/scraper/search-and-scrape-auto', {
         topic: topic.trim(),
         data_specification: topic.trim() || null
       })
 
-      setSearchResults(response.data.search_results)
-      setStep('results')
+      setScrapedData(response.data.results)
+      setStep('scraped') // Skip the results selection step, go directly to scraped data
     } catch (err: any) {
       const errorMessage = err.response?.data?.detail 
         || err.response?.data?.message 
         || err.message 
-        || `Failed to perform search: ${err.response?.statusText || err.response?.status || 'Unknown error'}`
+        || `Failed to search and scrape: ${err.response?.statusText || err.response?.status || 'Unknown error'}`
       setError(errorMessage)
     } finally {
       setLoading(false)
@@ -224,12 +225,12 @@ export default function Scraper() {
             {loading ? (
               <>
                 <Loader2 className="h-5 w-5 animate-spin" />
-                Searching...
+                Searching and scraping...
               </>
             ) : (
               <>
                 <Search className="h-5 w-5" />
-                Search
+                Search & Scrape Automatically
               </>
             )}
           </button>

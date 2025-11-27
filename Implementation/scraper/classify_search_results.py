@@ -42,7 +42,7 @@ KEEP_LABELS = [
     "somewhat_relevant",
 ]  # or set to None to keep everything
 
-MIN_CONFIDENCE = 0.94  # adjust if you want
+MIN_CONFIDENCE = 0.95  # Filter for high-confidence results (>= 0.95)
 
 
 # ─────────────────────────────────────────────

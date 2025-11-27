@@ -360,6 +360,130 @@ def scrape_selected_urls(request: LegacyScrapeRequest, http_request: Request):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.post("/scraper/search-and-scrape-auto", response_model=ScrapeResponse)
+def search_and_scrape_auto(request: ScrapeRequest):
+    """Complete automated flow: Search -> Classify -> Filter (confidence >= 0.95) -> Auto-scrape"""
+    try:
+        # Validate topic is provided
+        if not request.topic:
+            raise HTTPException(status_code=400, detail="Topic is required")
+        
+        from query_generator import generate_queries_with_gemini
+        from Google_search import call_google_search_save
+        from classify_search_results import classify_with_llm
+        from llm_scrape_from_seeds import llm_scrape_from_seeds, PARSER_INSTRUCTIONS
+        
+        # Step 1: Generate queries and search
+        if request.data_specification:
+            topic_with_spec = f"{request.topic}. Focus on finding: {request.data_specification}"
+        else:
+            topic_with_spec = request.topic
+        
+        queries = generate_queries_with_gemini(topic_with_spec, n=5)
+        raw_results_path = OUTPUT_DIR / "search_results_raw.ndjson"
+        call_google_search_save(queries, output_path=str(raw_results_path), results_per_query=10)
+        
+        # Step 2: Classify search results
+        classified_results_path = OUTPUT_DIR / "search_results_classified.ndjson"
+        classify_with_llm(
+            raw_path=str(raw_results_path),
+            output_path=str(classified_results_path),
+            batch_size=10
+        )
+        
+        # Step 3: Filter by confidence >= 0.95 and create seeds automatically
+        seeds_path = OUTPUT_DIR / "chosen_seeds.ndjson"
+        seeds = []
+        seen_urls = set()
+        all_candidates = []  # Collect all candidates first
+        
+        if classified_results_path.exists():
+            with open(classified_results_path, 'r', encoding='utf-8') as f:
+                for line in f:
+                    if line.strip():
+                        result = json.loads(line)
+                        confidence = result.get("confidence", 0.0)
+                        url = result.get("url", "")
+                        rank = result.get("rank", 999)  # Default to high rank if missing
+                        
+                        # Filter: confidence >= 0.95 and not duplicate
+                        if confidence >= 0.95 and url:
+                            normalized_url = url.rstrip('/').lower()
+                            if normalized_url not in seen_urls:
+                                seen_urls.add(normalized_url)
+                                all_candidates.append({
+                                    "url": url,
+                                    "label": result.get("label", "highly_relevant"),
+                                    "title": result.get("title", url),
+                                    "source_query": result.get("query", "auto_selected"),
+                                    "confidence": confidence,
+                                    "rank": rank
+                                })
+        
+        # Sort by confidence (descending) then by rank (ascending) and take top 20
+        all_candidates.sort(key=lambda x: (-x["confidence"], x["rank"]))
+        seeds = all_candidates[:20]  # Limit to top 20
+        
+        # Save filtered seeds (only top 20)
+        with open(seeds_path, 'w', encoding='utf-8') as f:
+            for seed in seeds:
+                # Remove confidence and rank from seed dict before saving
+                seed_to_save = {
+                    "url": seed["url"],
+                    "label": seed["label"],
+                    "title": seed["title"],
+                    "source_query": seed["source_query"]
+                }
+                f.write(json.dumps(seed_to_save, ensure_ascii=False) + '\n')
+        
+        if len(seeds) == 0:
+            return ScrapeResponse(
+                results=[],
+                message=f"No results found with confidence >= 0.95. Found {len(seeds)} URLs to scrape."
+            )
+        
+        # Step 4: Build user_request for scraping
+        user_request_parts = []
+        if request.topic:
+            user_request_parts.append(request.topic)
+        if request.data_specification:
+            user_request_parts.append(f"Focus on extracting: {request.data_specification}")
+        
+        if user_request_parts:
+            user_request = ". ".join(user_request_parts) + "."
+        else:
+            user_request = "Extract a general profile of each entity."
+        
+        # Modify PARSER_INSTRUCTIONS if data_specification provided
+        custom_instructions = None
+        if request.data_specification:
+            custom_instructions = PARSER_INSTRUCTIONS + f"\n\nIMPORTANT: The user specifically wants to extract: {request.data_specification}. Make sure to prioritize and extract this information prominently. If this information is not found on the page, set the relevant field(s) to null but ensure you thoroughly search for it."
+        
+        # Step 5: Scrape automatically
+        output_path = OUTPUT_DIR / "discovered_sites.ndjson"
+        llm_scrape_from_seeds(
+            seeds_path=str(seeds_path),
+            output_path=str(output_path),
+            delay_seconds=1.0,
+            user_request=user_request,
+            custom_parser_instructions=custom_instructions
+        )
+        
+        # Load and return results
+        results = []
+        if output_path.exists():
+            with open(output_path, 'r', encoding='utf-8') as f:
+                for line in f:
+                    if line.strip():
+                        results.append(json.loads(line))
+        
+        return ScrapeResponse(
+            results=results,
+            message=f"Automatically selected top {len(seeds)} URLs (confidence >= 0.95) and scraped {len(results)} entities."
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 # Auto-generate routes for all tables
 @app.on_event("startup")
 async def startup_event():
