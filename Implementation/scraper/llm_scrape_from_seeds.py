@@ -3,36 +3,29 @@ llm_scrape_from_seeds.py
 
 Reads chosen_seeds.ndjson (URLs picked by the user),
 downloads each page, and uses Gemini to extract structured
-press/magazine/agent info.
+info.
 
-Output: discovered_sites.ndjson (one JSON per URL).
+Output: discovered_sites.ndjson (one JSON per URL/entity).
 """
 import os
+import re
 import json
 import time
 from pathlib import Path
 from typing import Dict, Any, List, Optional
-from bs4 import BeautifulSoup
-from dotenv import load_dotenv
 
+from bs4 import BeautifulSoup
 import requests
 import google.generativeai as genai
 
-# Load environment variables from .env file if it exists (for local dev)
-# In Docker, environment variables are set by docker-compose, so this is optional
-try:
-    load_dotenv()
-except:
-    pass  # If .env doesn't exist, rely on environment variables from docker-compose
-
-SEEDS_PATH_DEFAULT = "chosen_seeds.ndjson"
+SEEDS_PATH_DEFAULT = "search_results_classified.ndjson"
 OUTPUT_PATH_DEFAULT = "discovered_sites.ndjson"
-API_KEY = os.getenv("GOOGLE_CSE_API_KEY")
-CX = os.getenv("GOOGLE_CSE_CX")
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
+# --- API KEYS -------------------------------------------------
+# Use a dedicated GEMINI_API_KEY here (NOT the CSE key)
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 if not GEMINI_API_KEY:
-    raise ValueError("GEMINI_API_KEY environment variable is not set. Check docker-compose.yml and .env file.")
+    raise RuntimeError("GEMINI_API_KEY is not set in the environment")
 
 genai.configure(api_key=GEMINI_API_KEY)
 MODEL_NAME = "models/gemini-2.5-flash"
@@ -43,63 +36,148 @@ DEFAULT_HEADERS = {
     "Accept-Language": "en-US,en;q=0.8",
 }
 
+# --- REGEX HELPERS (phone + email) ----------------------------
+
+PHONE_REGEX = re.compile(
+    r"""
+    (?:
+        \+?\d{1,3}[\s\-\.\)]*    # optional country code, like +1
+    )?
+    (?:
+        \(?\d{3}\)?              # area code: (604) or 604
+        [\s\-\.\)]*
+    )?
+    \d{3}                        # first 3 digits
+    [\s\-\.\)]*
+    \d{4}                        # last 4 digits
+    """,
+    re.VERBOSE,
+)
+
+EMAIL_REGEX = re.compile(
+    r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}"
+)
+
+def extract_phone_candidates(text: str) -> List[str]:
+    matches = {m.group(0).strip() for m in PHONE_REGEX.finditer(text)}
+    # keep only reasonable lengths (strip non-digits to check)
+    cleaned = []
+    for m in matches:
+        digits = re.sub(r"\D", "", m)
+        if 7 <= len(digits) <= 15:
+            cleaned.append(m)
+    return cleaned
+
+def extract_email_candidates(text: str) -> List[str]:
+    return list({m.group(0).strip() for m in EMAIL_REGEX.finditer(text)})
+
+
+# --- LLM INSTRUCTIONS -----------------------------------------
 
 PARSER_INSTRUCTIONS = """
-You are a data extractor for a publishing intelligence platform.
+You are a data extractor for a general-purpose information platform.
 
 Task:
-From the content of a web page about a literary press, magazine, or literary agent,
-extract structured data describing either:
-- a single publisher / magazine / agent, or
-- multiple entities if the page is clearly a directory or list (many agents/presses).
+From the content of a web page about ANY subject (for example: a company, person,
+product, service, event, directory, article, etc.), extract structured data that best
+answers what the USER CARES ABOUT.
 
-Output format:
-- If the page is about ONE main entity, return a single JSON OBJECT.
-- If the page clearly lists MANY distinct agents/presses/magazines (like a directory),
-  return a JSON ARRAY of JSON OBJECTS, one object per entity.
-- Do NOT wrap the result in any extra keys (no {"entities": [...]}) and do NOT add
+User intent:
+- You will be given a short natural-language description of what the user wants
+  (the "user request"), such as:
+  - "I only care about contact information and location"
+  - "Extract all pricing and subscription plans"
+  - "Summarize key specs for each product on the page"
+- Use this user request to decide which fields to prioritize and how detailed to be.
+- Fields that are strongly related to the user request should be as complete and
+  accurate as possible. Less relevant fields can be null or omitted.
+
+How to decide the output shape:
+- If the page is mostly about ONE main entity, return a single JSON OBJECT.
+- If the page clearly lists MANY distinct entities (like a directory, product list,
+  team members, etc.), return a JSON ARRAY of JSON OBJECTS, one object per entity.
+- Do NOT wrap the result in an outer object (no {"entities": [...]}) and do NOT add
   any extra text before or after. Only output raw JSON.
 
-Each entity object must have ALL of these keys:
+Entity schema:
+- Your JSON objects may contain any keys that make sense for the page and the
+  user request, but when possible use these common keys:
 
-- name (string or null)
-- website (string or null)             # main site URL, if you can infer it
-- contact_email (string or null)       # best submission / query / general contact email
-- genres (array of strings)            # e.g. ["poetry", "fiction"]
-- reading_period (string or null)      # e.g. "Jan 1 – Mar 31", or "year-round"
-- reading_fee (number)                 # numeric value; use 0 if free or unknown
-- submission_methods (array of strings) # e.g. ["Submittable", "email", "online form"]
-- city (string or null)
-- country (string or null)
-- response_time (string or null)       # e.g. "3–6 months"
-- notes (string or null)               # extra useful details or warnings
-
-Special guidance for contact_email:
-- Look for email addresses related to submissions, queries, or general contact.
-- If multiple emails exist, choose the one most relevant to submissions/queries.
-- If you cannot tell which email is best, choose the most prominent or general one.
-- If no email is present, set contact_email to null.
-
-Special guidance for literary agents (when the label suggests an agent/agency page):
-- Focus on what kinds of projects they represent (genres, age categories).
-- Note how to query them (email, QueryManager, agency form, etc.).
-- Note whether they are open or closed to queries.
-- Note any stated response policy (e.g. "no response means no", "respond within 8 weeks").
-
-Special guidance for presses / magazines:
-- Focus on genres they publish and submission guidelines.
-- Note open/close periods, reading windows, themes, contests, and fees.
+  - "name" (string or null)
+  - "category" (string or null)
+  - "description" (string or null)
+  - "website" (string or null)
+  - "contact_email" (string or null)
+  - "phone" (string or null)
+  - "address" (string or null)
+  - "city" (string or null)
+  - "country" (string or null)
+  - "social_links" (array of strings)
+  - "tags" (array of strings)
+  - "price" (string or null)
+  - "price_numeric" (number)
+  - "opening_hours" (string or null)
+  - "extra" (string or null)
 
 Rules:
 - If a value is missing or unclear, use null (or [] for arrays).
-- "reading_fee" must always be a NUMBER (0, 5, 10, etc.). Use 0 when uncertain.
-- Do NOT mention in the notes that the HTML is truncated or that you lack information;
-  just leave unknown fields as null or empty lists.
+- "price_numeric" must always be a NUMBER (0, 10, 99.99, etc.). Use 0 when uncertain.
+- If the page is a directory or list, each entity in the array should be a separate object.
+- Do NOT mention that the HTML is truncated or that you lack information; just leave
+  unknown fields as null or empty arrays.
+
+### SPECIAL CONTACT INFO RULES (VERY IMPORTANT)
+
+Most websites (restaurants, stores, small businesses, etc.) include a section called
+"Contact Us", "Contact", "Get in Touch", or similar. These sections almost ALWAYS
+contain phone numbers and email addresses.
+
+You MUST do the following:
+
+1. Search explicitly for any section headers that contain:
+   - "Contact Us"
+   - "Contact"
+   - "Contact Info"
+   - "Get in Touch"
+   - "Reach Us"
+   - "Support"
+
+2. When such sections exist, treat any phone numbers or emails inside that section
+   as **the primary values** for the entity.
+
+3. NEVER leave "phone" or "contact_email" null if a phone or email appears anywhere
+   inside a "Contact" section OR anywhere else on the page.
+
+4. If multiple phone numbers or emails exist:
+   - choose the most general one from the "Contact" section
+   - avoid using social media, reservation platforms, or marketing-specific emails.
+
+5. Only set "phone": null and "contact_email": null if ABSOLUTELY no phone or email
+   appear anywhere in the provided text.
+
+Contact information is CRITICAL.
+- If any phone-like pattern appears anywhere in the content, you MUST set the "phone"
+  field to that value instead of leaving it null.
+- If any email address appears anywhere in the content, you MUST set "contact_email"
+  (or "email") to that value instead of leaving it null.
+- Only leave these fields null if there is truly no phone number or email address
+  anywhere in the provided text.
+
+Special guidance when the user request is very specific:
+- If the user request only cares about certain information (for example: prices,
+  specs, or contact info), you should still output JSON OBJECTS, but you may
+  omit unrelated keys or set them to null.
+- Focus your effort on extracting the fields that answer the user request well.
+
+Output:
 - Output ONLY valid JSON (no comments, no markdown, no backticks, no explanations).
 """
 
+
+# --- UTILITIES ------------------------------------------------
+
 def load_ndjson(path: str) -> List[Dict[str, Any]]:
-    rows:List[Dict[str, Any]] = []
+    rows: List[Dict[str, Any]] = []
     with open(path, "r", encoding="utf-8") as f:
         for line in f:
             line = line.strip()
@@ -107,6 +185,7 @@ def load_ndjson(path: str) -> List[Dict[str, Any]]:
                 continue
             rows.append(json.loads(line))
     return rows
+
 
 def fetch_html(url: str, timeout: int = 15) -> Optional[str]:
     """Fetch HTML content from a URL."""
@@ -117,15 +196,11 @@ def fetch_html(url: str, timeout: int = 15) -> Optional[str]:
     except Exception as e:
         print(f"Error fetching {url}: {e}")
         return None
-def truncate_html(html: str, max_chars: int = MAX_HTML_CHARS) -> str:
-    if len(html) <= max_chars:
-        return html
-    return html[:max_chars]
+
 
 def prepare_html_for_llm(raw_html: str) -> str:
     soup = BeautifulSoup(raw_html, "html.parser")
 
-    # Try some common containers first; fall back to body text
     main = (
         soup.select_one("article")
         or soup.select_one("div.entry-content")
@@ -134,8 +209,15 @@ def prepare_html_for_llm(raw_html: str) -> str:
     )
 
     text = main.get_text("\n", strip=True) if main else soup.get_text("\n", strip=True)
-    # Still keep a max length safety
-    return text[:MAX_HTML_CHARS]
+
+    # If it's huge, keep both the beginning and the end (footer)
+    if len(text) > MAX_HTML_CHARS:
+        front = text[:20000]
+        back = text[-10000:]   # last 10k chars – where footer often lives
+        text = front + "\n...\n" + back
+
+    return text
+
 
 def strip_code_fence(text: str) -> str:
     t = text.strip()
@@ -147,142 +229,89 @@ def strip_code_fence(text: str) -> str:
             t = t[: t.rfind("```")]
     return t.strip()
 
+
+# --- LLM CALL -------------------------------------------------
+
 def call_gemini_extract(
     html: str,
     url: str,
     label: str,
     title: str,
     user_request: str,
-    parser_instructions: Optional[str] = None,
+    custom_parser_instructions: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
-    
+
     model = genai.GenerativeModel(
         MODEL_NAME,
         generation_config={
             "response_mime_type": "application/json",
+            "temperature": 0.0,
         },
     )
-    
-    html_snippet = prepare_html_for_llm(html)
-    
-    # Use custom instructions if provided, otherwise use default
-    instructions = parser_instructions if parser_instructions else PARSER_INSTRUCTIONS
 
-    prompt = f"""{instructions}
+    # Text for both Gemini and regex helpers
+    html_snippet = prepare_html_for_llm(html)
+
+    # Regex-based backups
+    phone_candidates = extract_phone_candidates(html_snippet)
+    email_candidates = extract_email_candidates(html_snippet)
+
+    # Use custom instructions if provided, otherwise use default
+    parser_instructions = custom_parser_instructions if custom_parser_instructions else PARSER_INSTRUCTIONS
 
     prompt = f"""{parser_instructions}
 
-    Extra context:
-    - URL: {url}
-    - Label (from search classification): {label}
-    - Page title: {title}
+User request:
+- {user_request}
 
-    REMEMBER:
-    - If this page is a directory with MANY presses / agents / magazines,
-      you may return EITHER:
-        1) {{ "entities": [ entity1, entity2, ... ] }}
-      OR
-        2) [ entity1, entity2, ... ]
-    - If there is just ONE main entity, return a single JSON OBJECT.
+Extra context:
+- URL: {url}
+- Label: {label}
+- Page title: {title}
 
-    Here is the page content (possibly truncated):
+Remember:
+- Output ONLY raw JSON.
+- Either a single JSON object OR a list of JSON objects.
 
-    <html>
-    {html_snippet}
-    </html>
-    """
+HTML content:
+{html_snippet}
+"""
 
-    entities: List[Dict[str, Any]] = []
     try:
         resp = model.generate_content(prompt)
-        raw_text = (resp.text or "").strip()
+        raw = (resp.text or "").strip()
+        clean = strip_code_fence(raw)
+        data = json.loads(clean)
 
-        # DEBUG (keep if useful)
-        print("\n=== RAW LLM OUTPUT (truncated) ===")
-        print(raw_text[:500])
-        print("=== END RAW OUTPUT ===\n")
-
-        clean_text = strip_code_fence(raw_text)
-
-        data = json.loads(clean_text)
-
-        # Normalize:
-        # 1) {"entities": [...]}
-        if isinstance(data, dict) and "entities" in data and isinstance(data["entities"], list):
-            entities = [d for d in data["entities"] if isinstance(d, dict)]
-
-        # 2) plain dict -> single entity
-        elif isinstance(data, dict):
+        # Normalize to list
+        if isinstance(data, dict):
             entities = [data]
-
-        # 3) list of dicts
         elif isinstance(data, list):
-            entities = [d for d in data if isinstance(d, dict)]
-
+            entities = data
         else:
-            raise ValueError("Gemini response is neither dict nor list of dicts")
+            raise ValueError("LLM returned invalid JSON type")
 
-        # If entities[] came back empty, treat as “nothing extracted”
-        if not entities:
-            raise ValueError("No entities extracted from page")
+        # Fallback: if phone/email missing but regex found candidates, fill them
+        best_phone = phone_candidates[0] if phone_candidates else None
+        best_email = email_candidates[0] if email_candidates else None
+
+        for ent in entities:
+            phone_val = ent.get("phone")
+            if best_phone and (phone_val in (None, "", "null")):
+                ent["phone"] = best_phone
+
+            email_val = ent.get("contact_email") or ent.get("email")
+            if best_email and (email_val in (None, "", "null")):
+                ent["contact_email"] = best_email
+
+        return entities
 
     except Exception as e:
-        print(f"[LLM] Parse error for {url}: {e}")
-        # Fallback: one empty-ish entity
-        entities = [
-            {
-                "name": None,
-                "website": None,
-                "genres": [],
-                "reading_period": None,
-                "reading_fee": 0,
-                "submission_methods": [],
-                "city": None,
-                "country": None,
-                "contact_email ": None,
-                "response_time": None,
-                "notes": f"llm_error: {e}",
-            }
-        ]
+        print(f"[ERROR] LLM extract failed for {url}: {e}")
+        return [{"error": str(e)}]
 
-    # 🔧 Normalize each entity safely
-    required_keys = [
-        "name",
-        "website",
-        "genres",
-        "reading_period",
-        "reading_fee",
-        "submission_methods",
-        "city",
-        "country",
-        "contact_email ",
-        "response_time",
-        "notes",
-    ]
 
-    for ent in entities:
-        # Ensure all keys exist
-        for key in required_keys:
-            if key not in ent:
-                ent[key] = [] if key in ("genres", "submission_methods") else None
-
-        # genres as list
-        if not isinstance(ent.get("genres"), list):
-            ent["genres"] = [str(ent["genres"])] if ent["genres"] else []
-
-        # submission_methods as list
-        if not isinstance(ent.get("submission_methods"), list):
-            ent["submission_methods"] = (
-                [str(ent["submission_methods"])] if ent["submission_methods"] else []
-            )
-
-        # reading_fee numeric
-        try:
-            ent["reading_fee"] = float(ent.get("reading_fee", 0) or 0)
-        except (TypeError, ValueError):
-            ent["reading_fee"] = 0.0
-
-    return entities
+# --- MAIN PIPELINE --------------------------------------------
 
 def llm_scrape_from_seeds(
     seeds_path: str = SEEDS_PATH_DEFAULT,
@@ -291,6 +320,7 @@ def llm_scrape_from_seeds(
     user_request: str = "Extract a general profile of each entity.",
     custom_parser_instructions: Optional[str] = None,
 ) -> None:
+
     seeds = load_ndjson(seeds_path)
     print(f"Loaded {len(seeds)} seeds from {seeds_path}")
 
@@ -303,17 +333,17 @@ def llm_scrape_from_seeds(
 
             print(f"\n[{idx}/{len(seeds)}] Fetching {url} (label={label})")
             html = fetch_html(url)
-            if  html is None:
+
+            if html is None:
                 record = {
                     "url": url,
                     "label": label,
                     "title": title,
-                    "source_query":item.get("source_query"),
+                    "source_query": item.get("source_query"),
                     "scraped_status": "http_error",
                     "scraped_at": None,
                     "llm_payload": None,
                 }
-
                 f_out.write(json.dumps(record, ensure_ascii=False) + "\n")
                 continue
 
@@ -324,23 +354,28 @@ def llm_scrape_from_seeds(
                 label=label,
                 title=title,
                 user_request=user_request,
-                parser_instructions=custom_parser_instructions,
+                custom_parser_instructions=custom_parser_instructions,
             )
 
             now_str = time.strftime("%Y-%m-%dT%H:%M:%S%z")
             for ent in entities:
                 record = {
-                "url": url,                         # directory or single page URL
-                "label": label,
-                "title": title,
-                "source_query": item.get("source_query"),
-                "scraped_status": "ok",
-                "scraped_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
-                "llm_payload": ent,
+                    "url": url,
+                    "label": label,
+                    "title": title,
+                    "source_query": item.get("source_query"),
+                    "scraped_status": "ok",
+                    "scraped_at": now_str,
+                    "llm_payload": ent,
                 }
                 f_out.write(json.dumps(record, ensure_ascii=False) + "\n")
+
             if delay_seconds > 0:
-                 time.sleep(delay_seconds)
+                time.sleep(delay_seconds)
+
 
 if __name__ == "__main__":
-    llm_scrape_from_seeds()
+    request_user = input(
+        "Describe what kind of information would you like to extract: "
+    )
+    llm_scrape_from_seeds(user_request=request_user)

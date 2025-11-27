@@ -1,12 +1,31 @@
-<<<<<<< HEAD
-# Environment variables
+# ============================
+# ENVIRONMENT FILES
+# ============================
 .env
 .env.local
 .env.*.local
+*.env
+*/.env
+Implementation/backend/.env
 # Allow .env.example files (templates)
 !.env.example
 
-# Python
+# ============================
+# PYTHON VIRTUAL ENVIRONMENTS
+# ============================
+# Ignore Python virtual environments
+.venv/
+venv/
+env/
+ENV/
+*/.venv/
+*/venv/
+myvenv2/
+*/myvenv2/
+
+# ============================
+# PYTHON CACHE FILES
+# ============================
 __pycache__/
 *.py[cod]
 *$py.class
@@ -28,52 +47,7 @@ wheels/
 .installed.cfg
 *.egg
 MANIFEST
-
-# Virtual environments
-venv/
-env/
-ENV/
-.venv
-
-# IDE
-.vscode/
-.idea/
-*.swp
-*.swo
-*~
-
-# OS
-.DS_Store
-Thumbs.db
-
-# Logs
-*.log
-logs/
-
-# Node modules (if any at root)
-node_modules/
-
-=======
-# ============================
-# ENVIRONMENT FILES
-# ============================
-.env
-*.env
-*/.env
-Implementation/backend/.env
-
-
-# ============================
-# PYTHON VIRTUAL ENVIRONMENTS
-# ============================
-# Ignore Python virtual environments
-.venv/
-venv/
-*/.venv/
-*/venv/
-myvenv2/
-*/myvenv2/
-
+*.pyc
 
 # ============================
 # NODE MODULES (for your frontend)
@@ -82,8 +56,22 @@ node_modules/
 */node_modules/
 
 # ============================
-# PYTHON CACHE FILES
+# IDE
 # ============================
-__pycache__/
-*.pyc
->>>>>>> f9aaa7b2e778fd0acde5ffce0e85bc73f645d815
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# ============================
+# OS
+# ============================
+.DS_Store
+Thumbs.db
+
+# ============================
+# LOGS
+# ============================
+*.log
+logs/
