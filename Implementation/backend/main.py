@@ -115,6 +115,9 @@ class LegacyScrapeRequest(BaseModel):
 class ScrapeResponse(BaseModel):
     results: List[dict]
     message: str
+    total_available_links: Optional[int] = None
+    scraped_count: Optional[int] = None
+    has_more: Optional[bool] = None
 
 # Add scraper to path - handle both Docker (/app/scraper) and local dev (../scraper)
 scraper_path = Path("/app/scraper")  # Docker: scraper is mounted at /app/scraper
@@ -420,11 +423,18 @@ def search_and_scrape_auto(request: ScrapeRequest):
                                     "rank": rank
                                 })
         
-        # Sort by confidence (descending) then by rank (ascending) and take top 20
+        # Sort by confidence (descending) then by rank (ascending) and take top 10
         all_candidates.sort(key=lambda x: (-x["confidence"], x["rank"]))
-        seeds = all_candidates[:20]  # Limit to top 20
+        total_available = len(all_candidates)
+        seeds = all_candidates[:10]  # Limit to top 10
         
-        # Save filtered seeds (only top 20)
+        # Save all candidates to a file for potential future scraping (with metadata)
+        all_candidates_path = OUTPUT_DIR / "all_candidates.ndjson"
+        with open(all_candidates_path, 'w', encoding='utf-8') as f:
+            for candidate in all_candidates:
+                f.write(json.dumps(candidate, ensure_ascii=False) + '\n')
+        
+        # Save filtered seeds (only top 10) for current scraping
         with open(seeds_path, 'w', encoding='utf-8') as f:
             for seed in seeds:
                 # Remove confidence and rank from seed dict before saving
@@ -439,7 +449,10 @@ def search_and_scrape_auto(request: ScrapeRequest):
         if len(seeds) == 0:
             return ScrapeResponse(
                 results=[],
-                message=f"No results found with confidence >= 0.95. Found {len(seeds)} URLs to scrape."
+                message=f"No results found with confidence >= 0.95. Found {len(all_candidates)} URLs to scrape.",
+                total_available_links=len(all_candidates),
+                scraped_count=0,
+                has_more=False
             )
         
         # Step 4: Build user_request for scraping
@@ -479,8 +492,131 @@ def search_and_scrape_auto(request: ScrapeRequest):
         
         return ScrapeResponse(
             results=results,
-            message=f"Automatically selected top {len(seeds)} URLs (confidence >= 0.95) and scraped {len(results)} entities."
+            message=f"Scraped top {len(seeds)} URLs (confidence >= 0.95). {total_available} total links available.",
+            total_available_links=total_available,
+            scraped_count=len(results),
+            has_more=(total_available > len(seeds))
         )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/scraper/scrape-more", response_model=ScrapeResponse)
+def scrape_more(request: ScrapeRequest):
+    """Scrape the next batch of links (next 10) from remaining candidates"""
+    try:
+        # Validate topic is provided
+        if not request.topic:
+            raise HTTPException(status_code=400, detail="Topic is required")
+        
+        from llm_scrape_from_seeds import llm_scrape_from_seeds, PARSER_INSTRUCTIONS
+        
+        # Load all candidates
+        all_candidates_path = OUTPUT_DIR / "all_candidates.ndjson"
+        if not all_candidates_path.exists():
+            raise HTTPException(status_code=404, detail="No candidates found. Please run a search first.")
+        
+        # Load already scraped URLs to avoid duplicates
+        discovered_sites_path = OUTPUT_DIR / "discovered_sites.ndjson"
+        scraped_urls = set()
+        if discovered_sites_path.exists():
+            with open(discovered_sites_path, 'r', encoding='utf-8') as f:
+                for line in f:
+                    if line.strip():
+                        result = json.loads(line)
+                        url = result.get("url", "")
+                        if url:
+                            scraped_urls.add(url.rstrip('/').lower())
+        
+        # Load all candidates and filter out already scraped ones
+        all_candidates = []
+        with open(all_candidates_path, 'r', encoding='utf-8') as f:
+            for line in f:
+                if line.strip():
+                    candidate = json.loads(line)
+                    normalized_url = candidate.get("url", "").rstrip('/').lower()
+                    if normalized_url not in scraped_urls:
+                        all_candidates.append(candidate)
+        
+        if len(all_candidates) == 0:
+            return ScrapeResponse(
+                results=[],
+                message="No more links to scrape. All available links have been scraped.",
+                total_available_links=0,
+                scraped_count=0,
+                has_more=False
+            )
+        
+        # Sort and take next 10
+        all_candidates.sort(key=lambda x: (-x.get("confidence", 0.0), x.get("rank", 999)))
+        next_batch = all_candidates[:10]
+        
+        # Create seeds file for this batch
+        seeds_path = OUTPUT_DIR / "chosen_seeds.ndjson"
+        with open(seeds_path, 'w', encoding='utf-8') as f:
+            for candidate in next_batch:
+                seed = {
+                    "url": candidate["url"],
+                    "label": candidate.get("label", "highly_relevant"),
+                    "title": candidate.get("title", candidate["url"]),
+                    "source_query": candidate.get("source_query", "auto_selected")
+                }
+                f.write(json.dumps(seed, ensure_ascii=False) + '\n')
+        
+        # Build user_request for scraping
+        user_request_parts = []
+        if request.topic:
+            user_request_parts.append(request.topic)
+        if request.data_specification:
+            user_request_parts.append(f"Focus on extracting: {request.data_specification}")
+        
+        if user_request_parts:
+            user_request = ". ".join(user_request_parts) + "."
+        else:
+            user_request = "Extract a general profile of each entity."
+        
+        # Modify PARSER_INSTRUCTIONS if data_specification provided
+        custom_instructions = None
+        if request.data_specification:
+            custom_instructions = PARSER_INSTRUCTIONS + f"\n\nIMPORTANT: The user specifically wants to extract: {request.data_specification}. Make sure to prioritize and extract this information prominently. If this information is not found on the page, set the relevant field(s) to null but ensure you thoroughly search for it."
+        
+        # Scrape this batch (append to existing file)
+        temp_output_path = OUTPUT_DIR / "discovered_sites_temp.ndjson"
+        llm_scrape_from_seeds(
+            seeds_path=str(seeds_path),
+            output_path=str(temp_output_path),
+            delay_seconds=1.0,
+            user_request=user_request,
+            custom_parser_instructions=custom_instructions
+        )
+        
+        # Append new results to existing discovered_sites.ndjson
+        new_results = []
+        if temp_output_path.exists():
+            with open(temp_output_path, 'r', encoding='utf-8') as f:
+                for line in f:
+                    if line.strip():
+                        new_results.append(json.loads(line))
+            
+            # Append to main file
+            with open(discovered_sites_path, 'a', encoding='utf-8') as f:
+                for result in new_results:
+                    f.write(json.dumps(result, ensure_ascii=False) + '\n')
+            
+            # Clean up temp file
+            temp_output_path.unlink()
+        
+        # Calculate remaining
+        remaining_count = len(all_candidates) - len(next_batch)
+        
+        return ScrapeResponse(
+            results=new_results,
+            message=f"Scraped {len(next_batch)} more URLs. {remaining_count} links remaining.",
+            total_available_links=len(all_candidates),
+            scraped_count=len(new_results),
+            has_more=(remaining_count > 0)
+        )
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

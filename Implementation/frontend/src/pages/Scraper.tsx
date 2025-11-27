@@ -30,6 +30,9 @@ export default function Scraper() {
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [step, setStep] = useState<'input' | 'results' | 'scraped'>('input')
+  const [totalAvailableLinks, setTotalAvailableLinks] = useState<number | null>(null)
+  const [hasMoreLinks, setHasMoreLinks] = useState(false)
+  const [scrapingMore, setScrapingMore] = useState(false)
 
   // Flexible function to detect what fields user wants from their free-form input
   const detectRequestedFields = (dataSpec: string): string[] => {
@@ -101,15 +104,19 @@ export default function Scraper() {
     setSearchResults([])
     setSelectedUrls(new Set())
     setScrapedData([])
+    setTotalAvailableLinks(null)
+    setHasMoreLinks(false)
 
     try {
-      // Use the automatic endpoint that does: search -> classify -> filter (confidence >= 0.95) -> scrape
+      // Use the automatic endpoint that does: search -> classify -> filter (confidence >= 0.95) -> scrape top 10
       const response = await api.post('/scraper/search-and-scrape-auto', {
         topic: topic.trim(),
         data_specification: topic.trim() || null
       })
 
       setScrapedData(response.data.results)
+      setTotalAvailableLinks(response.data.total_available_links || null)
+      setHasMoreLinks(response.data.has_more || false)
       setStep('scraped') // Skip the results selection step, go directly to scraped data
     } catch (err: any) {
       const errorMessage = err.response?.data?.detail 
@@ -119,6 +126,35 @@ export default function Scraper() {
       setError(errorMessage)
     } finally {
       setLoading(false)
+    }
+  }
+
+  const handleScrapeMore = async () => {
+    if (!topic.trim()) {
+      setError('Topic is required')
+      return
+    }
+
+    setScrapingMore(true)
+    setError(null)
+
+    try {
+      const response = await api.post('/scraper/scrape-more', {
+        topic: topic.trim(),
+        data_specification: topic.trim() || null
+      })
+
+      // Append new results to existing scraped data
+      setScrapedData(prev => [...prev, ...response.data.results])
+      setHasMoreLinks(response.data.has_more || false)
+    } catch (err: any) {
+      const errorMessage = err.response?.data?.detail 
+        || err.response?.data?.message 
+        || err.message 
+        || `Failed to scrape more links: ${err.response?.statusText || err.response?.status || 'Unknown error'}`
+      setError(errorMessage)
+    } finally {
+      setScrapingMore(false)
     }
   }
 
@@ -349,7 +385,24 @@ export default function Scraper() {
                 </h2>
                 <p className="text-sm text-[#64748B] mt-1">
                   {scrapedData.length} entit{scrapedData.length !== 1 ? 'ies' : 'y'} extracted
+                  {totalAvailableLinks !== null && (
+                    <span className="ml-2">
+                      • {totalAvailableLinks} total link{totalAvailableLinks !== 1 ? 's' : ''} available
+                    </span>
+                  )}
                 </p>
+                {totalAvailableLinks !== null && (
+                  <div className="mt-2 bg-blue-50 border border-blue-200 rounded-lg p-3">
+                    <p className="text-sm text-blue-900">
+                      <strong>Note:</strong> We scraped the top 10 links (confidence ≥ 0.95) to get you results quickly.
+                      {hasMoreLinks && (
+                        <span className="block mt-1">
+                          You can scrape more links below if needed.
+                        </span>
+                      )}
+                    </p>
+                  </div>
+                )}
               </div>
               <button
                 onClick={() => {
@@ -357,6 +410,8 @@ export default function Scraper() {
                   setSearchResults([])
                   setSelectedUrls(new Set())
                   setScrapedData([])
+                  setTotalAvailableLinks(null)
+                  setHasMoreLinks(false)
                 }}
                 className="text-sm text-[#5E60F8] hover:text-[#D946EF] font-medium transition-colors"
               >
@@ -622,6 +677,49 @@ export default function Scraper() {
                 </div>
               ))}
             </div>
+
+            {/* Scrape More Button */}
+            {hasMoreLinks && (
+              <div className="mt-6 pt-6 border-t border-slate-200">
+                <div className="bg-amber-50 border border-amber-200 rounded-lg p-4 mb-4">
+                  <p className="text-sm text-amber-900 mb-2">
+                    <strong>More links available!</strong> You can scrape additional links to get more data.
+                  </p>
+                  {totalAvailableLinks !== null && (
+                    <p className="text-xs text-amber-700">
+                      Currently showing {scrapedData.length} of {totalAvailableLinks} available links.
+                    </p>
+                  )}
+                </div>
+                <button
+                  onClick={handleScrapeMore}
+                  disabled={scrapingMore}
+                  className="w-full bg-gradient-to-r from-amber-600 to-orange-600 text-white px-6 py-3 rounded-lg hover:opacity-90 disabled:opacity-50 disabled:cursor-not-allowed transition-all flex items-center justify-center gap-2 font-medium"
+                >
+                  {scrapingMore ? (
+                    <>
+                      <Loader2 className="h-5 w-5 animate-spin" />
+                      Scraping more links...
+                    </>
+                  ) : (
+                    <>
+                      <CheckCircle2 className="h-5 w-5" />
+                      Scrape Next 10 Links
+                    </>
+                  )}
+                </button>
+              </div>
+            )}
+
+            {!hasMoreLinks && totalAvailableLinks !== null && totalAvailableLinks > 0 && (
+              <div className="mt-6 pt-6 border-t border-slate-200">
+                <div className="bg-green-50 border border-green-200 rounded-lg p-4">
+                  <p className="text-sm text-green-900">
+                    ✅ All available links have been scraped! ({scrapedData.length} total)
+                  </p>
+                </div>
+              </div>
+            )}
           </div>
         </div>
       )}
