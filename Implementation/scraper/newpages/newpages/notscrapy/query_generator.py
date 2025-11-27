@@ -61,13 +61,13 @@ def generate_queries_with_gemini(user_text: str, n: int = 5) -> list[str]:
         BUT only if they make sense.
     6. The {n} queries must be distinct, not tiny variations of each other.
     7. Make the queries concrete and actionable, not just "gym Vancouver".
-        Prefer more specific phrasing that matches how people search.
+    Prefer more specific phrasing that matches how people search.
 
-    Output format (VERY IMPORTANT):
-    - Return a JSON array of EXACTLY {n} strings.
-    - Example: ["query 1", "query 2", "query 3"]
-    - No extra keys, no explanations, no comments, no markdown.
-    """
+  Output format (VERY IMPORTANT):
+ - Return a JSON array of EXACTLY {n} strings.
+ - Example: ["query 1", "query 2", "query 3"]
+ - No extra keys, no explanations, no comments, no markdown.
+"""
 
     try:
         resp = model.generate_content(prompt)
