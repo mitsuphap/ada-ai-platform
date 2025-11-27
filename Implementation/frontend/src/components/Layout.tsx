@@ -16,10 +16,10 @@ export default function Layout({ children }: LayoutProps) {
                 to="/"
                 className="text-lg sm:text-xl font-semibold text-white hover:text-white/90 transition-colors"
               >
-                Automated Data Intelligence
+                Ada Automated Data Intelligence
               </Link>
               <p className="text-sm text-white/75">
-                Unified visibility for publishing data pipelines and exploration.
+                Unified visibility for exploration.
               </p>
             </div>
             <div className="flex flex-col sm:flex-row items-start sm:items-center gap-4">

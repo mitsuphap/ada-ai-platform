@@ -108,7 +108,7 @@ export default function Scraper() {
     setHasMoreLinks(false)
 
     try {
-      // Use the automatic endpoint that does: search -> classify -> filter (confidence >= 0.95) -> scrape top 10
+      // Use the automatic endpoint that does: search -> classify -> filter (confidence >= 0.95) -> scrape top 5
       const response = await api.post('/scraper/search-and-scrape-auto', {
         topic: topic.trim(),
         data_specification: topic.trim() || null
@@ -394,7 +394,7 @@ export default function Scraper() {
                 {totalAvailableLinks !== null && (
                   <div className="mt-2 bg-blue-50 border border-blue-200 rounded-lg p-3">
                     <p className="text-sm text-blue-900">
-                      <strong>Note:</strong> We scraped the top 10 links (confidence ≥ 0.95) to get you results quickly.
+                      <strong>Note:</strong> We scraped the top 5 links (confidence ≥ 0.95) to get you results quickly.
                       {hasMoreLinks && (
                         <span className="block mt-1">
                           You can scrape more links below if needed.
@@ -704,7 +704,7 @@ export default function Scraper() {
                   ) : (
                     <>
                       <CheckCircle2 className="h-5 w-5" />
-                      Scrape Next 10 Links
+                      Scrape Next 5 Links
                     </>
                   )}
                 </button>

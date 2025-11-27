@@ -19,7 +19,7 @@ import json
 # Manual routers removed - using auto-generation only
 
 app = FastAPI(
-    title="Automated Data Intelligence for Publishing & Beyond",
+    title="Ada Automated Data Intelligence",
     description="Self-generating REST API with automatic endpoint creation based on database schema",
     version="2.0.0"
 )
@@ -423,10 +423,10 @@ def search_and_scrape_auto(request: ScrapeRequest):
                                     "rank": rank
                                 })
         
-        # Sort by confidence (descending) then by rank (ascending) and take top 10
+        # Sort by confidence (descending) then by rank (ascending) and take top 5
         all_candidates.sort(key=lambda x: (-x["confidence"], x["rank"]))
         total_available = len(all_candidates)
-        seeds = all_candidates[:10]  # Limit to top 10
+        seeds = all_candidates[:5]  # Limit to top 5
         
         # Save all candidates to a file for potential future scraping (with metadata)
         all_candidates_path = OUTPUT_DIR / "all_candidates.ndjson"
@@ -434,7 +434,7 @@ def search_and_scrape_auto(request: ScrapeRequest):
             for candidate in all_candidates:
                 f.write(json.dumps(candidate, ensure_ascii=False) + '\n')
         
-        # Save filtered seeds (only top 10) for current scraping
+        # Save filtered seeds (only top 5) for current scraping
         with open(seeds_path, 'w', encoding='utf-8') as f:
             for seed in seeds:
                 # Remove confidence and rank from seed dict before saving
@@ -546,9 +546,9 @@ def scrape_more(request: ScrapeRequest):
                 has_more=False
             )
         
-        # Sort and take next 10
+        # Sort and take next 5
         all_candidates.sort(key=lambda x: (-x.get("confidence", 0.0), x.get("rank", 999)))
-        next_batch = all_candidates[:10]
+        next_batch = all_candidates[:5]
         
         # Create seeds file for this batch
         seeds_path = OUTPUT_DIR / "chosen_seeds.ndjson"
