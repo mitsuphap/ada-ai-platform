@@ -24,7 +24,6 @@ interface ScrapedEntity {
 
 export default function Scraper() {
   const [topic, setTopic] = useState('')
-  const [dataSpecification, setDataSpecification] = useState('')
   const [searchResults, setSearchResults] = useState<SearchResult[]>([])
   const [selectedUrls, setSelectedUrls] = useState<Set<string>>(new Set())
   const [scrapedData, setScrapedData] = useState<ScrapedEntity[]>([])
@@ -106,7 +105,7 @@ export default function Scraper() {
     try {
       const response = await api.post('/scraper/generate-search', {
         topic: topic.trim(),
-        data_specification: dataSpecification.trim() || null
+        data_specification: topic.trim() || null
       })
 
       setSearchResults(response.data.search_results)
@@ -156,7 +155,7 @@ export default function Scraper() {
       // Step 3: Scrape from chosen_seeds.ndjson
       const response = await api.post('/scraper/scrape-seeds', {
         topic: topic.trim() || null,
-        data_specification: dataSpecification.trim() || null
+        data_specification: topic.trim() || null
       })
 
       setScrapedData(response.data.results)
@@ -202,30 +201,12 @@ export default function Scraper() {
                   handleSearch()
                 }
               }}
-              placeholder="e.g., poetry presses in Canada"
+              placeholder="e.g., restaurants in Vancouver with phone number and address"
               className="w-full px-4 py-3 border border-slate-300 rounded-lg focus:ring-2 focus:ring-[#5E60F8] focus:border-[#5E60F8] transition-colors"
               disabled={loading}
             />
             <p className="mt-1 text-sm text-[#64748B]">
-              Enter a natural language description of what you want to search for
-            </p>
-          </div>
-
-          <div>
-            <label htmlFor="dataSpec" className="block text-sm font-medium text-[#0F172A] mb-2">
-              Data Specification (Optional)
-            </label>
-            <textarea
-              id="dataSpec"
-              value={dataSpecification}
-              onChange={(e) => setDataSpecification(e.target.value)}
-              placeholder="e.g., Focus on extracting press name, contact email, and submission guidelines"
-              rows={4}
-              className="w-full px-4 py-3 border border-slate-300 rounded-lg focus:ring-2 focus:ring-[#5E60F8] focus:border-[#5E60F8] transition-colors resize-none"
-              disabled={loading}
-            />
-            <p className="mt-1 text-sm text-[#64748B]">
-              Specify what data you want extracted.
+              Describe what you're searching for and include the data fields you want extracted (e.g., phone number, email, address, contact info)
             </p>
           </div>
 
@@ -389,7 +370,7 @@ export default function Scraper() {
             )}
 
             {/* Summary of data extraction results */}
-            {dataSpecification && (() => {
+            {topic && (() => {
               // Filter out failed entities (http_error, etc.)
               const successfulEntities = scrapedData.filter(item => 
                 item.scraped_status === 'ok' && item.llm_payload
@@ -397,7 +378,7 @@ export default function Scraper() {
               
               const failedEntities = scrapedData.filter(item => item.scraped_status !== 'ok')
               
-              const requestedFields = detectRequestedFields(dataSpecification)
+              const requestedFields = detectRequestedFields(topic)
               
               // Count entities that have ALL requested fields (only from successful ones)
               const entitiesWithData = successfulEntities.filter(item => {
@@ -439,7 +420,7 @@ export default function Scraper() {
                           <p className={`text-xs mt-1 ${
                             entitiesWithData > 0 ? 'text-green-700' : 'text-amber-700'
                           }`}>
-                            Requested: "{dataSpecification}"
+                            Requested: "{topic}"
                           </p>
                         </div>
                       </div>
@@ -493,8 +474,8 @@ export default function Scraper() {
                       </span>
                     )}
                     {/* Show missing fields badge */}
-                    {dataSpecification && item.llm_payload && (() => {
-                      const missing = getMissingFields(dataSpecification, item.llm_payload)
+                    {topic && item.llm_payload && (() => {
+                      const missing = getMissingFields(topic, item.llm_payload)
                       return missing.length > 0 ? (
                         <span className="inline-block text-xs px-2 py-1 rounded font-medium bg-amber-100 text-amber-700">
                           Missing: {missing.join(', ')}
@@ -524,7 +505,7 @@ export default function Scraper() {
                           </div>
                         )}
                         {/* Contact Email - show if requested or if exists */}
-                        {((dataSpecification && detectRequestedFields(dataSpecification).includes('contact_email')) || 
+                        {((topic && detectRequestedFields(topic).includes('contact_email')) || 
                           item.llm_payload.contact_email) && (
                           <div>
                             <span className="font-medium text-[#0F172A]">Email:</span>{' '}
@@ -541,7 +522,7 @@ export default function Scraper() {
                           </div>
                         )}
                         {/* Phone - show if requested or if exists */}
-                        {((dataSpecification && detectRequestedFields(dataSpecification).includes('phone')) || 
+                        {((topic && detectRequestedFields(topic).includes('phone')) || 
                           item.llm_payload.phone) && (
                           <div>
                             <span className="font-medium text-[#0F172A]">Phone:</span>{' '}
