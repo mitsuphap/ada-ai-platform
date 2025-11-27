@@ -13,15 +13,26 @@ import time
 from pathlib import Path
 from typing import Dict, Any, List, Optional
 from bs4 import BeautifulSoup
+from dotenv import load_dotenv
 
 import requests
 import google.generativeai as genai
 
+# Load environment variables from .env file if it exists (for local dev)
+# In Docker, environment variables are set by docker-compose, so this is optional
+try:
+    load_dotenv()
+except:
+    pass  # If .env doesn't exist, rely on environment variables from docker-compose
+
 SEEDS_PATH_DEFAULT = "chosen_seeds.ndjson"
 OUTPUT_PATH_DEFAULT = "discovered_sites.ndjson"
+API_KEY = os.getenv("GOOGLE_CSE_API_KEY")
+CX = os.getenv("GOOGLE_CSE_CX")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
-
+if not GEMINI_API_KEY:
+    raise ValueError("GEMINI_API_KEY environment variable is not set. Check docker-compose.yml and .env file.")
 
 genai.configure(api_key=GEMINI_API_KEY)
 MODEL_NAME = "models/gemini-2.5-flash"
@@ -34,70 +45,56 @@ DEFAULT_HEADERS = {
 
 
 PARSER_INSTRUCTIONS = """
-You are a data extractor for a general-purpose information platform.
+You are a data extractor for a publishing intelligence platform.
 
 Task:
-From the content of a web page about ANY subject (for example: a company, person,
-product, service, event, directory, article, etc.), extract structured data that best
-answers what the USER CARES ABOUT.
+From the content of a web page about a literary press, magazine, or literary agent,
+extract structured data describing either:
+- a single publisher / magazine / agent, or
+- multiple entities if the page is clearly a directory or list (many agents/presses).
 
-User intent:
-- You will be given a short natural-language description of what the user wants
-  (the "user request"), such as:
-  - "I only care about contact information and location"
-  - "Extract all pricing and subscription plans"
-  - "Summarize key specs for each product on the page"
-- Use this user request to decide which fields to prioritize and how detailed to be.
-- Fields that are strongly related to the user request should be as complete and
-  accurate as possible. Less relevant fields can be null or omitted.
-
-How to decide the output shape:
-- If the page is mostly about ONE main entity, return a single JSON OBJECT.
-- If the page clearly lists MANY distinct entities (like a directory, product list,
-  team members, etc.), return a JSON ARRAY of JSON OBJECTS, one object per entity.
-- Do NOT wrap the result in an outer object (no {"entities": [...]}) and do NOT add
+Output format:
+- If the page is about ONE main entity, return a single JSON OBJECT.
+- If the page clearly lists MANY distinct agents/presses/magazines (like a directory),
+  return a JSON ARRAY of JSON OBJECTS, one object per entity.
+- Do NOT wrap the result in any extra keys (no {"entities": [...]}) and do NOT add
   any extra text before or after. Only output raw JSON.
 
-Entity schema:
-- Your JSON objects may contain any keys that make sense for the page and the
-  user request, but when possible use these common keys:
+Each entity object must have ALL of these keys:
 
-  - "name" (string or null)             # main name of the entity
-  - "category" (string or null)         # type of entity (e.g. "company", "person", "product")
-  - "description" (string or null)      # short free-text summary
-  - "website" (string or null)          # main site URL if any
-  - "contact_email" (string or null)    # best contact email
-  - "phone" (string or null)
-  - "address" (string or null)
-  - "city" (string or null)
-  - "country" (string or null)
-  - "social_links" (array of strings)   # e.g. Twitter, Instagram, LinkedIn URLs
-  - "tags" (array of strings)           # keywords, topics, technologies, etc.
-  - "price" (string or null)            # human-readable price or plan text
-  - "price_numeric" (number)            # numeric price if clearly stated; 0 if unknown
-  - "opening_hours" (string or null)    # business hours, schedule, availability
-  - "extra" (string or null)            # any important details that don't fit above
+- name (string or null)
+- website (string or null)             # main site URL, if you can infer it
+- contact_email (string or null)       # best submission / query / general contact email
+- genres (array of strings)            # e.g. ["poetry", "fiction"]
+- reading_period (string or null)      # e.g. "Jan 1 – Mar 31", or "year-round"
+- reading_fee (number)                 # numeric value; use 0 if free or unknown
+- submission_methods (array of strings) # e.g. ["Submittable", "email", "online form"]
+- city (string or null)
+- country (string or null)
+- response_time (string or null)       # e.g. "3–6 months"
+- notes (string or null)               # extra useful details or warnings
+
+Special guidance for contact_email:
+- Look for email addresses related to submissions, queries, or general contact.
+- If multiple emails exist, choose the one most relevant to submissions/queries.
+- If you cannot tell which email is best, choose the most prominent or general one.
+- If no email is present, set contact_email to null.
+
+Special guidance for literary agents (when the label suggests an agent/agency page):
+- Focus on what kinds of projects they represent (genres, age categories).
+- Note how to query them (email, QueryManager, agency form, etc.).
+- Note whether they are open or closed to queries.
+- Note any stated response policy (e.g. "no response means no", "respond within 8 weeks").
+
+Special guidance for presses / magazines:
+- Focus on genres they publish and submission guidelines.
+- Note open/close periods, reading windows, themes, contests, and fees.
 
 Rules:
 - If a value is missing or unclear, use null (or [] for arrays).
-- "price_numeric" must always be a NUMBER (0, 10, 99.99, etc.). Use 0 when uncertain.
-- If the page is a directory or list, each entity in the array should be a separate object.
-- Do NOT mention that the HTML is truncated or that you lack information; just leave
-  unknown fields as null or empty arrays.
-
-Special guidance for contact information:
-- For "contact_email", look for email addresses associated with contacting, support,
-  sales, or inquiries. If multiple emails exist, pick the most general or the one
-  most relevant to the user request (e.g. support vs. sales).
-- For "phone" and "address", prefer the most prominent or general ones.
-
-Special guidance when the user request is very specific:
-- If the user request only cares about certain information (for example: prices,
-  specs, or contact info), you should still output JSON OBJECTS, but you may
-  omit unrelated keys or set them to null.
-- Focus your effort on extracting the fields that answer the user request well.
-
-Output:
+- "reading_fee" must always be a NUMBER (0, 5, 10, etc.). Use 0 when uncertain.
+- Do NOT mention in the notes that the HTML is truncated or that you lack information;
+  just leave unknown fields as null or empty lists.
 - Output ONLY valid JSON (no comments, no markdown, no backticks, no explanations).
 """
 
@@ -162,7 +159,7 @@ def call_gemini_extract(
     model = genai.GenerativeModel(
         MODEL_NAME,
         generation_config={
-            "response_mime_type": "application/json"
+            "response_mime_type": "application/json",
         },
     )
     
@@ -173,40 +170,119 @@ def call_gemini_extract(
 
     prompt = f"""{instructions}
 
-    User request:
-    - {user_request}
+    prompt = f"""{parser_instructions}
 
     Extra context:
     - URL: {url}
-    - Label: {label}
+    - Label (from search classification): {label}
     - Page title: {title}
 
-    Remember:
-    - Output ONLY raw JSON.
-    - Either a single JSON object OR a list of JSON objects.
+    REMEMBER:
+    - If this page is a directory with MANY presses / agents / magazines,
+      you may return EITHER:
+        1) {{ "entities": [ entity1, entity2, ... ] }}
+      OR
+        2) [ entity1, entity2, ... ]
+    - If there is just ONE main entity, return a single JSON OBJECT.
 
-    HTML content:
+    Here is the page content (possibly truncated):
+
+    <html>
     {html_snippet}
+    </html>
     """
 
+    entities: List[Dict[str, Any]] = []
     try:
         resp = model.generate_content(prompt)
-        raw = (resp.text or "").strip()
-        clean = strip_code_fence(raw)
-        data = json.loads(clean)
+        raw_text = (resp.text or "").strip()
 
-        # Accept dict or list directly
-        if isinstance(data, dict):
-            return [data]
+        # DEBUG (keep if useful)
+        print("\n=== RAW LLM OUTPUT (truncated) ===")
+        print(raw_text[:500])
+        print("=== END RAW OUTPUT ===\n")
+
+        clean_text = strip_code_fence(raw_text)
+
+        data = json.loads(clean_text)
+
+        # Normalize:
+        # 1) {"entities": [...]}
+        if isinstance(data, dict) and "entities" in data and isinstance(data["entities"], list):
+            entities = [d for d in data["entities"] if isinstance(d, dict)]
+
+        # 2) plain dict -> single entity
+        elif isinstance(data, dict):
+            entities = [data]
+
+        # 3) list of dicts
         elif isinstance(data, list):
-            return data
+            entities = [d for d in data if isinstance(d, dict)]
+
         else:
-            raise ValueError("LLM returned invalid JSON type")
+            raise ValueError("Gemini response is neither dict nor list of dicts")
+
+        # If entities[] came back empty, treat as “nothing extracted”
+        if not entities:
+            raise ValueError("No entities extracted from page")
 
     except Exception as e:
-        print(f"[ERROR] LLM extract failed for {url}: {e}")
-        return [{"error": str(e)}]
+        print(f"[LLM] Parse error for {url}: {e}")
+        # Fallback: one empty-ish entity
+        entities = [
+            {
+                "name": None,
+                "website": None,
+                "genres": [],
+                "reading_period": None,
+                "reading_fee": 0,
+                "submission_methods": [],
+                "city": None,
+                "country": None,
+                "contact_email ": None,
+                "response_time": None,
+                "notes": f"llm_error: {e}",
+            }
+        ]
 
+    # 🔧 Normalize each entity safely
+    required_keys = [
+        "name",
+        "website",
+        "genres",
+        "reading_period",
+        "reading_fee",
+        "submission_methods",
+        "city",
+        "country",
+        "contact_email ",
+        "response_time",
+        "notes",
+    ]
+
+    for ent in entities:
+        # Ensure all keys exist
+        for key in required_keys:
+            if key not in ent:
+                ent[key] = [] if key in ("genres", "submission_methods") else None
+
+        # genres as list
+        if not isinstance(ent.get("genres"), list):
+            ent["genres"] = [str(ent["genres"])] if ent["genres"] else []
+
+        # submission_methods as list
+        if not isinstance(ent.get("submission_methods"), list):
+            ent["submission_methods"] = (
+                [str(ent["submission_methods"])] if ent["submission_methods"] else []
+            )
+
+        # reading_fee numeric
+        try:
+            ent["reading_fee"] = float(ent.get("reading_fee", 0) or 0)
+        except (TypeError, ValueError):
+            ent["reading_fee"] = 0.0
+
+    return entities
 
 def llm_scrape_from_seeds(
     seeds_path: str = SEEDS_PATH_DEFAULT,
@@ -215,7 +291,6 @@ def llm_scrape_from_seeds(
     user_request: str = "Extract a general profile of each entity.",
     custom_parser_instructions: Optional[str] = None,
 ) -> None:
-    
     seeds = load_ndjson(seeds_path)
     print(f"Loaded {len(seeds)} seeds from {seeds_path}")
 
@@ -228,17 +303,17 @@ def llm_scrape_from_seeds(
 
             print(f"\n[{idx}/{len(seeds)}] Fetching {url} (label={label})")
             html = fetch_html(url)
-            
-            if html is None:
+            if  html is None:
                 record = {
                     "url": url,
                     "label": label,
                     "title": title,
-                    "source_query": item.get("source_query"),
+                    "source_query":item.get("source_query"),
                     "scraped_status": "http_error",
                     "scraped_at": None,
                     "llm_payload": None,
                 }
+
                 f_out.write(json.dumps(record, ensure_ascii=False) + "\n")
                 continue
 
@@ -255,28 +330,17 @@ def llm_scrape_from_seeds(
             now_str = time.strftime("%Y-%m-%dT%H:%M:%S%z")
             for ent in entities:
                 record = {
-                    "url": url,
-                    "label": label,
-                    "title": title,
-                    "source_query": item.get("source_query"),
-                    "scraped_status": "ok",
-                    "scraped_at": now_str,
-                    "llm_payload": ent,
+                "url": url,                         # directory or single page URL
+                "label": label,
+                "title": title,
+                "source_query": item.get("source_query"),
+                "scraped_status": "ok",
+                "scraped_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+                "llm_payload": ent,
                 }
                 f_out.write(json.dumps(record, ensure_ascii=False) + "\n")
-
             if delay_seconds > 0:
-                time.sleep(delay_seconds)
+                 time.sleep(delay_seconds)
 
 if __name__ == "__main__":
-    request_user = input("Describe what kind of information would you like to extract: ")
-    import argparse
-    parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "--mode",
-        default="Extract a general profile of each entity.",
-        help="NATURAL LANGUAGE DESCRIPTION of what the user wants to extract.", 
-
-    )
-    args = parser.parse_args()
-    llm_scrape_from_seeds(user_request=request_user)
+    llm_scrape_from_seeds()

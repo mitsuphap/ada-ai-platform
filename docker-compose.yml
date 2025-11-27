@@ -23,6 +23,16 @@ services:
       timeout: 3s
       retries: 20
 
+  scraper:
+    build: ./Implementation/scraper
+    container_name: ada_scraper
+    depends_on:
+      db:
+        condition: service_healthy
+    volumes:
+      # scraper writes NDJSON here (bind-mounted to host)
+      - ./Implementation/scraper/output:/app/output
+
   loader:
     image: python:3.11-slim
     container_name: ada_loader
@@ -30,6 +40,8 @@ services:
     depends_on:
       db:
         condition: service_healthy
+      scraper:
+        condition: service_started
     environment:
       PGPASSWORD: ${POSTGRES_PASSWORD:-ada}
       POSTGRES_USER: ${POSTGRES_USER:-ada}

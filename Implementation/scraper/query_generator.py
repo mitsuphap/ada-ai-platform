@@ -1,10 +1,21 @@
 import os
 import json
+from dotenv import load_dotenv
 import google.generativeai as genai
+
+# Load environment variables from .env file if it exists (for local dev)
+# In Docker, environment variables are set by docker-compose, so this is optional
+try:
+    load_dotenv()
+except:
+    pass  # If .env doesn't exist, rely on environment variables from docker-compose
 
 API_KEY = os.getenv("GOOGLE_CSE_API_KEY")
 CX = os.getenv("GOOGLE_CSE_CX")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+
+if not GEMINI_API_KEY:
+    raise ValueError("GEMINI_API_KEY environment variable is not set. Check docker-compose.yml and .env file.")
 
 genai.configure(api_key=GEMINI_API_KEY)
 model = genai.GenerativeModel(
@@ -19,20 +30,17 @@ model = genai.GenerativeModel(
 def generate_queries_with_gemini(user_text: str, n: int = 5) -> list[str]:
     """
     Take one natural-language sentence and return a list of search queries.
-
     Example input:
-        "I want gyms near Vancouver that are cheap"
-    Possible output:
+        "I want more poetry presses in Canada"
+    Output:
         [
-          "cheap gym memberships Vancouver BC -reddit -blog -list -directory",
-          "24 hour fitness gym Vancouver membership price -top -best -review",
+          "poetry presses Canada submission guidelines",
+          "Canadian small poetry presses open submissions",
           ...
         ]
     """
-
     prompt = f"""
-    You are an expert Google Search query generator for a general-purpose data
-    discovery system.
+                You are an expert search-query generator for a publishing data intelligence system.
 
     Your job:
     - Take a single user request (what they are looking for).
@@ -112,7 +120,7 @@ def generate_queries_with_gemini(user_text: str, n: int = 5) -> list[str]:
         queries = [user_text.strip()]
 
     # Deduplicate and strip
-    cleaned: list[str] = []
+    cleaned = []
     seen = set()
     for q in queries:
         q = q.strip()

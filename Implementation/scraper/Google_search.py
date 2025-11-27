@@ -2,7 +2,15 @@ import os
 import requests
 import json
 from datetime import datetime, timezone
+from dotenv import load_dotenv
 import time
+
+# Load environment variables from .env file if it exists (for local dev)
+# In Docker, environment variables are set by docker-compose, so this is optional
+try:
+    load_dotenv()
+except:
+    pass  # If .env doesn't exist, rely on environment variables from docker-compose
 
 API_KEY = os.getenv("GOOGLE_CSE_API_KEY")
 CX = os.getenv("GOOGLE_CSE_CX")
