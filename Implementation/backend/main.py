@@ -95,6 +95,10 @@ if not scraper_path.exists():
 if scraper_path.exists():
     sys.path.insert(0, str(scraper_path))
 
+# Output directory - mounted at /data in Docker, or use scraper/output locally
+OUTPUT_DIR = Path("/data") if Path("/data").exists() else Path(__file__).parent.parent / "scraper" / "output"
+OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+
 # Request/Response models
 class SearchRequest(BaseModel):
     topic: str
@@ -105,8 +109,18 @@ class SearchResponse(BaseModel):
     search_results: List[dict]
     message: str
 
-class ScrapeRequest(BaseModel):
+class SaveSeedsRequest(BaseModel):
     urls: List[str]
+    titles: Optional[List[str]] = None
+    queries: Optional[List[str]] = None
+
+class ScrapeRequest(BaseModel):
+    topic: Optional[str] = None
+    data_specification: Optional[str] = None
+
+class LegacyScrapeRequest(BaseModel):
+    urls: List[str]
+    topic: Optional[str] = None
     data_specification: Optional[str] = None
 
 class ScrapeResponse(BaseModel):
@@ -115,7 +129,7 @@ class ScrapeResponse(BaseModel):
 
 @app.post("/scraper/generate-search", response_model=SearchResponse)
 def generate_and_search(request: SearchRequest, http_request: Request):
-    """Generate queries from topic and execute Google search"""
+    """Step 1: Generate queries from topic and execute Google search, save to search_results_raw.ndjson"""
     try:
         from query_generator import generate_queries_with_gemini
         from Google_search import call_google_search_save
@@ -127,32 +141,214 @@ def generate_and_search(request: SearchRequest, http_request: Request):
             topic_with_spec = request.topic
         queries = generate_queries_with_gemini(topic_with_spec, n=5)
         
-        # Create temporary file for search results
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.ndjson', delete=False) as tmp:
-            tmp_path = tmp.name
+        # Save to search_results_raw.ndjson in output directory (matches script workflow)
+        output_path = OUTPUT_DIR / "search_results_raw.ndjson"
+        call_google_search_save(queries, output_path=str(output_path), results_per_query=10)
         
-        # Execute search
-        call_google_search_save(queries, output_path=tmp_path, results_per_query=10)
-        
-        # Load and return results
+        # Load and return results (with deduplication as safety measure)
         results = []
-        with open(tmp_path, 'r', encoding='utf-8') as f:
-            for line in f:
-                if line.strip():
-                    results.append(json.loads(line))
-        
-        # Clean up temp file
-        os.unlink(tmp_path)
+        seen_urls = set()
+        if output_path.exists():
+            with open(output_path, 'r', encoding='utf-8') as f:
+                for line in f:
+                    if line.strip():
+                        result = json.loads(line)
+                        # Deduplicate by URL (normalize for comparison)
+                        normalized_url = result.get("url", "").rstrip('/').lower()
+                        if normalized_url and normalized_url not in seen_urls:
+                            seen_urls.add(normalized_url)
+                            results.append(result)
         
         return SearchResponse(
             queries=queries,
             search_results=results,
-            message=f"Found {len(results)} search results"
+            message=f"Found {len(results)} unique search results. Saved to search_results_raw.ndjson"
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.get("/scraper/search-results")
+def get_search_results():
+    """Get search results from search_results_raw.ndjson"""
+    try:
+        results_path = OUTPUT_DIR / "search_results_raw.ndjson"
+        
+        if not results_path.exists():
+            return {
+                "search_results": [],
+                "message": "No search results found. Run a search first."
+            }
+        
+        results = []
+        seen_urls = set()
+        with open(results_path, 'r', encoding='utf-8') as f:
+            for line in f:
+                if line.strip():
+                    result = json.loads(line)
+                    # Deduplicate by URL (normalize for comparison)
+                    normalized_url = result.get("url", "").rstrip('/').lower()
+                    if normalized_url and normalized_url not in seen_urls:
+                        seen_urls.add(normalized_url)
+                        results.append(result)
+        
+        return {
+            "search_results": results,
+            "message": f"Found {len(results)} unique search results"
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/scraper/save-seeds")
+def save_seeds(request: SaveSeedsRequest):
+    """Step 2: Save selected URLs to chosen_seeds.ndjson"""
+    try:
+        seeds_path = OUTPUT_DIR / "chosen_seeds.ndjson"
+        
+        seeds = []
+        for idx, url in enumerate(request.urls):
+            seed = {
+                "url": url,
+                "label": "user_selected",
+                "title": request.titles[idx] if request.titles and idx < len(request.titles) else url,
+                "source_query": request.queries[idx] if request.queries and idx < len(request.queries) else "user_selected"
+            }
+            seeds.append(seed)
+        
+        # Write to chosen_seeds.ndjson
+        with open(seeds_path, 'w', encoding='utf-8') as f:
+            for seed in seeds:
+                f.write(json.dumps(seed, ensure_ascii=False) + '\n')
+        
+        return {
+            "message": f"Saved {len(seeds)} URLs to chosen_seeds.ndjson",
+            "seeds_count": len(seeds),
+            "path": str(seeds_path)
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/scraper/scrape-seeds", response_model=ScrapeResponse)
+def scrape_seeds(request: ScrapeRequest):
+    """Step 3: Read chosen_seeds.ndjson and scrape, save to discovered_sites.ndjson"""
+    try:
+        from llm_scrape_from_seeds import llm_scrape_from_seeds, PARSER_INSTRUCTIONS
+        
+        seeds_path = OUTPUT_DIR / "chosen_seeds.ndjson"
+        output_path = OUTPUT_DIR / "discovered_sites.ndjson"
+        
+        if not seeds_path.exists():
+            raise HTTPException(status_code=404, detail="chosen_seeds.ndjson not found. Please select URLs first.")
+        
+        # Build user_request from topic and data_specification for better context
+        user_request_parts = []
+        if request.topic:
+            user_request_parts.append(request.topic)
+        if request.data_specification:
+            user_request_parts.append(f"Focus on extracting: {request.data_specification}")
+        
+        if user_request_parts:
+            user_request = ". ".join(user_request_parts) + "."
+        else:
+            user_request = "Extract a general profile of each entity."
+        
+        # Modify PARSER_INSTRUCTIONS if data_specification provided
+        custom_instructions = None
+        if request.data_specification:
+            custom_instructions = PARSER_INSTRUCTIONS + f"\n\nIMPORTANT: The user specifically wants to extract: {request.data_specification}. Make sure to prioritize and extract this information prominently. If this information is not found on the page, set the relevant field(s) to null but ensure you thoroughly search for it."
+        
+        # Scrape from chosen_seeds.ndjson, save to discovered_sites.ndjson
+        llm_scrape_from_seeds(
+            seeds_path=str(seeds_path),
+            output_path=str(output_path),
+            delay_seconds=1.0,
+            user_request=user_request,
+            custom_parser_instructions=custom_instructions
+        )
+        
+        # Load results
+        results = []
+        if output_path.exists():
+            with open(output_path, 'r', encoding='utf-8') as f:
+                for line in f:
+                    if line.strip():
+                        results.append(json.loads(line))
+        
+        return ScrapeResponse(
+            results=results,
+            message=f"Scraped {len(results)} entities. Saved to discovered_sites.ndjson"
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 @app.post("/scraper/scrape-urls", response_model=ScrapeResponse)
+def scrape_selected_urls(request: LegacyScrapeRequest, http_request: Request):
+    """Legacy endpoint: Scrape selected URLs with custom data specification (for backward compatibility)"""
+    try:
+        from llm_scrape_from_seeds import llm_scrape_from_seeds, PARSER_INSTRUCTIONS
+        
+        # Create seeds file from selected URLs
+        seeds = []
+        for url in request.urls:
+            seeds.append({
+                "url": url,
+                "label": "single_press_site",  # Default label
+                "title": url,
+                "source_query": "user_selected"
+            })
+        
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.ndjson', delete=False) as tmp_seeds:
+            seeds_path = tmp_seeds.name
+            for seed in seeds:
+                tmp_seeds.write(json.dumps(seed, ensure_ascii=False) + '\n')
+        
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.ndjson', delete=False) as tmp_output:
+            output_path = tmp_output.name
+        
+        # Build user_request from topic and data_specification for better context
+        user_request_parts = []
+        if request.topic:
+            user_request_parts.append(request.topic)
+        if request.data_specification:
+            user_request_parts.append(f"Focus on extracting: {request.data_specification}")
+        
+        if user_request_parts:
+            user_request = ". ".join(user_request_parts) + "."
+        else:
+            user_request = "Extract a general profile of each entity."
+        
+        # Modify PARSER_INSTRUCTIONS if data_specification provided
+        custom_instructions = None
+        if request.data_specification:
+            custom_instructions = PARSER_INSTRUCTIONS + f"\n\nIMPORTANT: The user specifically wants to extract: {request.data_specification}. Make sure to prioritize and extract this information prominently. If this information is not found on the page, set the relevant field(s) to null but ensure you thoroughly search for it."
+        
+        # Scrape with topic context
+        llm_scrape_from_seeds(
+            seeds_path=seeds_path,
+            output_path=output_path,
+            delay_seconds=1.0,
+            user_request=user_request,
+            custom_parser_instructions=custom_instructions
+        )
+        
+        # Load results
+        results = []
+        with open(output_path, 'r', encoding='utf-8') as f:
+            for line in f:
+                if line.strip():
+                    results.append(json.loads(line))
+        
+        # Clean up
+        os.unlink(seeds_path)
+        os.unlink(output_path)
+        
+        return ScrapeResponse(
+            results=results,
+            message=f"Scraped {len(results)} entities"
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 def scrape_selected_urls(request: ScrapeRequest, http_request: Request):
     """Scrape selected URLs with custom data specification"""
     try:
@@ -176,16 +372,29 @@ def scrape_selected_urls(request: ScrapeRequest, http_request: Request):
         with tempfile.NamedTemporaryFile(mode='w', suffix='.ndjson', delete=False) as tmp_output:
             output_path = tmp_output.name
         
+        # Build user_request from topic and data_specification for better context
+        user_request_parts = []
+        if request.topic:
+            user_request_parts.append(request.topic)
+        if request.data_specification:
+            user_request_parts.append(f"Focus on extracting: {request.data_specification}")
+        
+        if user_request_parts:
+            user_request = ". ".join(user_request_parts) + "."
+        else:
+            user_request = "Extract a general profile of each entity."
+        
         # Modify PARSER_INSTRUCTIONS if data_specification provided
         custom_instructions = None
         if request.data_specification:
             custom_instructions = PARSER_INSTRUCTIONS + f"\n\nIMPORTANT: The user specifically wants to extract: {request.data_specification}. Make sure to prioritize and extract this information prominently. If this information is not found on the page, set the relevant field(s) to null but ensure you thoroughly search for it."
         
-        # Scrape
+        # Scrape with topic context
         llm_scrape_from_seeds(
             seeds_path=seeds_path,
             output_path=output_path,
             delay_seconds=1.0,
+            user_request=user_request,
             custom_parser_instructions=custom_instructions
         )
         

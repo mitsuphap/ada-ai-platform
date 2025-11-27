@@ -143,8 +143,19 @@ export default function Scraper() {
     setScrapedData([])
 
     try {
-      const response = await api.post('/scraper/scrape-urls', {
-        urls: Array.from(selectedUrls),
+      // Step 2: Save selected URLs to chosen_seeds.ndjson
+      const selectedUrlsArray = Array.from(selectedUrls)
+      const selectedResults = searchResults.filter(r => selectedUrlsArray.includes(r.url))
+      
+      await api.post('/scraper/save-seeds', {
+        urls: selectedUrlsArray,
+        titles: selectedResults.map(r => r.title),
+        queries: selectedResults.map(r => r.query)
+      })
+
+      // Step 3: Scrape from chosen_seeds.ndjson
+      const response = await api.post('/scraper/scrape-seeds', {
+        topic: topic.trim() || null,
         data_specification: dataSpecification.trim() || null
       })
 
@@ -377,35 +388,96 @@ export default function Scraper() {
               </div>
             )}
 
-            {/* Summary of missing data */}
+            {/* Summary of data extraction results */}
             {dataSpecification && (() => {
-              const entitiesWithMissing = scrapedData.filter(item => {
-                if (!item.llm_payload) return false
-                return getMissingFields(dataSpecification, item.llm_payload).length > 0
-              })
+              // Filter out failed entities (http_error, etc.)
+              const successfulEntities = scrapedData.filter(item => 
+                item.scraped_status === 'ok' && item.llm_payload
+              )
               
-              if (entitiesWithMissing.length > 0) {
+              const failedEntities = scrapedData.filter(item => item.scraped_status !== 'ok')
+              
+              const requestedFields = detectRequestedFields(dataSpecification)
+              
+              // Count entities that have ALL requested fields (only from successful ones)
+              const entitiesWithData = successfulEntities.filter(item => {
+                // Entity has data only if ALL requested fields are present
+                return requestedFields.every(field => {
+                  const value = item.llm_payload[field]
+                  return value !== null && value !== undefined && 
+                         !(Array.isArray(value) && value.length === 0) &&
+                         !(typeof value === 'string' && value.trim() === '')
+                })
+              }).length
+              
+              const entitiesWithMissing = successfulEntities.length - entitiesWithData
+              
+              if (scrapedData.length > 0) {
                 return (
-                  <div className="bg-amber-50 border border-amber-200 rounded-lg p-4 mb-4">
-                    <div className="flex items-start gap-2">
-                      <span className="text-amber-600">⚠️</span>
-                      <div>
-                        <p className="text-sm font-medium text-amber-900">
-                          {entitiesWithMissing.length} of {scrapedData.length} entities are missing requested data
-                        </p>
-                        <p className="text-xs text-amber-700 mt-1">
-                          Requested: "{dataSpecification}"
-                        </p>
+                  <>
+                    <div className={`border rounded-lg p-4 mb-4 ${
+                      entitiesWithData > 0 
+                        ? 'bg-green-50 border-green-200' 
+                        : 'bg-amber-50 border-amber-200'
+                    }`}>
+                      <div className="flex items-start gap-2">
+                        <span className={entitiesWithData > 0 ? 'text-green-600' : 'text-amber-600'}>
+                          {entitiesWithData > 0 ? '✅' : '⚠️'}
+                        </span>
+                        <div>
+                          <p className={`text-sm font-medium ${
+                            entitiesWithData > 0 ? 'text-green-900' : 'text-amber-900'
+                          }`}>
+                            {entitiesWithData} of {successfulEntities.length} entities have the requested data
+                            {entitiesWithMissing > 0 && (
+                              <span className="text-amber-700"> ({entitiesWithMissing} missing)</span>
+                            )}
+                            {failedEntities.length > 0 && (
+                              <span className="text-gray-600"> • {failedEntities.length} failed to load</span>
+                            )}
+                          </p>
+                          <p className={`text-xs mt-1 ${
+                            entitiesWithData > 0 ? 'text-green-700' : 'text-amber-700'
+                          }`}>
+                            Requested: "{dataSpecification}"
+                          </p>
+                        </div>
                       </div>
                     </div>
-                  </div>
+                    
+                    {/* Show failed URLs in collapsed section */}
+                    {failedEntities.length > 0 && (
+                      <details className="mb-4 border border-gray-200 rounded-lg p-3 bg-gray-50">
+                        <summary className="cursor-pointer text-sm text-gray-600 hover:text-gray-800 font-medium">
+                          {failedEntities.length} URL{failedEntities.length !== 1 ? 's' : ''} failed to load (click to view)
+                        </summary>
+                        <div className="mt-3 space-y-2 pl-4 border-l-2 border-gray-300">
+                          {failedEntities.map((item, idx) => (
+                            <div key={idx} className="text-xs text-gray-600 py-1">
+                              <a 
+                                href={item.url} 
+                                target="_blank" 
+                                rel="noopener noreferrer" 
+                                className="text-blue-600 hover:underline break-all"
+                              >
+                                {item.url}
+                              </a>
+                              <span className="ml-2 text-gray-500">({item.scraped_status})</span>
+                            </div>
+                          ))}
+                        </div>
+                      </details>
+                    )}
+                  </>
                 )
               }
               return null
             })()}
 
             <div className="space-y-4">
-              {scrapedData.map((item, idx) => (
+              {scrapedData
+                .filter(item => item.scraped_status === 'ok' && item.llm_payload)
+                .map((item, idx) => (
                 <div key={idx} className="border border-slate-200 rounded-lg p-5 hover:shadow-sm transition-shadow">
                   <div className="mb-3 flex items-center gap-2 flex-wrap">
                     <span className={`inline-block text-xs px-2 py-1 rounded font-medium ${
@@ -462,6 +534,23 @@ export default function Scraper() {
                                 className="text-[#5E60F8] hover:text-[#D946EF] hover:underline"
                               >
                                 {item.llm_payload.contact_email}
+                              </a>
+                            ) : (
+                              <span className="text-amber-600 italic text-xs">Not found on page</span>
+                            )}
+                          </div>
+                        )}
+                        {/* Phone - show if requested or if exists */}
+                        {((dataSpecification && detectRequestedFields(dataSpecification).includes('phone')) || 
+                          item.llm_payload.phone) && (
+                          <div>
+                            <span className="font-medium text-[#0F172A]">Phone:</span>{' '}
+                            {item.llm_payload.phone ? (
+                              <a 
+                                href={`tel:${item.llm_payload.phone}`}
+                                className="text-[#5E60F8] hover:text-[#D946EF] hover:underline"
+                              >
+                                {item.llm_payload.phone}
                               </a>
                             ) : (
                               <span className="text-amber-600 italic text-xs">Not found on page</span>

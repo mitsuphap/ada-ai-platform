@@ -7,7 +7,12 @@ CX = os.getenv("GOOGLE_CSE_CX")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
 genai.configure(api_key=GEMINI_API_KEY)
-model = genai.GenerativeModel("models/gemini-2.5-flash")
+model = genai.GenerativeModel(
+    "models/gemini-2.5-flash",
+    generation_config={
+        "response_mime_type": "application/json"
+    }
+)
 
 
 
@@ -69,18 +74,37 @@ def generate_queries_with_gemini(user_text: str, n: int = 5) -> list[str]:
     - No extra keys, no explanations, no comments, no markdown.
     """
 
+    def strip_code_fence(text: str) -> str:
+        """Remove markdown code fences if present"""
+        t = text.strip()
+        if t.startswith("```"):
+            first_newline = t.find("\n")
+            if first_newline != -1:
+                t = t[first_newline + 1:]
+            if t.strip().endswith("```"):
+                t = t[:t.rfind("```")]
+        return t.strip()
+
     try:
         resp = model.generate_content(prompt)
         raw = (resp.text or "").strip()
-
-        # Since we forced application/json, resp.text should already be JSON
-        data = json.loads(raw)
+        
+        # Strip markdown code fences if present (fallback safety)
+        clean_raw = strip_code_fence(raw)
+        
+        # Parse JSON (should work since we configured response_mime_type)
+        data = json.loads(clean_raw)
 
         # Keep only strings
         queries = [q for q in data if isinstance(q, str)]
 
+    except json.JSONDecodeError as e:
+        print(f"[ERROR] Failed to parse JSON from Gemini: {e}")
+        print(f"[ERROR] Raw response: {raw[:200]}...")  # Log first 200 chars for debugging
+        queries = []
     except Exception as e:
-        print(f"[ERROR] Failed to parse queries from Gemini: {e}")
+        print(f"[ERROR] Unexpected error parsing queries from Gemini: {e}")
+        print(f"[ERROR] Raw response: {raw[:200] if 'raw' in locals() else 'N/A'}...")
         queries = []
 
     # Very defensive fallback: if nothing parsed, just reuse the user text
