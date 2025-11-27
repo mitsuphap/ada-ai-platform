@@ -82,8 +82,8 @@ services:
       # GOOGLE_CSE_API_KEY needs to be added to Implementation/backend/.env file
       # with the same value as GEMINI_API_KEY
     volumes:
-      # optional: api can also see the raw json data if needed
-      - ./Implementation/scraper/output:/data:ro
+      # API needs write access to save search_results_raw.ndjson, chosen_seeds.ndjson, discovered_sites.ndjson
+      - ./Implementation/scraper/output:/data
       # Mount scraper source code so backend can import it
       - ./Implementation/scraper:/app/scraper:ro
 

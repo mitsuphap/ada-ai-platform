@@ -147,19 +147,28 @@ def strip_code_fence(text: str) -> str:
             t = t[: t.rfind("```")]
     return t.strip()
 
-def call_gemini_extract(html: str, url: str, label: str, title: str, custom_instructions: Optional[str] = None) -> List[Dict[str, Any]]:
-    # You can keep or remove JSON mode; this just increases chance of clean JSON
+def call_gemini_extract(
+    html: str,
+    url: str,
+    label: str,
+    title: str,
+    user_request: str,
+    parser_instructions: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    
     model = genai.GenerativeModel(
         MODEL_NAME,
         generation_config={
             "response_mime_type": "application/json",
         },
     )
-
-    html_snippet = prepare_html_for_llm(html)  # or html[:MAX_HTML_CHARS]
-
+    
+    html_snippet = prepare_html_for_llm(html)
+    
     # Use custom instructions if provided, otherwise use default
-    parser_instructions = custom_instructions if custom_instructions else PARSER_INSTRUCTIONS
+    instructions = parser_instructions if parser_instructions else PARSER_INSTRUCTIONS
+
+    prompt = f"""{instructions}
 
     prompt = f"""{parser_instructions}
 
@@ -279,7 +288,8 @@ def llm_scrape_from_seeds(
     seeds_path: str = SEEDS_PATH_DEFAULT,
     output_path: str = OUTPUT_PATH_DEFAULT,
     delay_seconds: float = 1.0,
-    custom_parser_instructions: Optional[str] = None
+    user_request: str = "Extract a general profile of each entity.",
+    custom_parser_instructions: Optional[str] = None,
 ) -> None:
     seeds = load_ndjson(seeds_path)
     print(f"Loaded {len(seeds)} seeds from {seeds_path}")
@@ -308,9 +318,17 @@ def llm_scrape_from_seeds(
                 continue
 
             print(f"[LLM] Extracting structured data for {url} ...")
-            extracted_entities = call_gemini_extract(html, url=url, label=label, title=title, custom_instructions=custom_parser_instructions)
+            entities = call_gemini_extract(
+                html,
+                url=url,
+                label=label,
+                title=title,
+                user_request=user_request,
+                parser_instructions=custom_parser_instructions,
+            )
 
-            for ent in extracted_entities:
+            now_str = time.strftime("%Y-%m-%dT%H:%M:%S%z")
+            for ent in entities:
                 record = {
                 "url": url,                         # directory or single page URL
                 "label": label,

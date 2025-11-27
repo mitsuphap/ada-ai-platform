@@ -16,7 +16,7 @@ def load_ndjson(path: str) -> List[Dict[str, Any]]:
 
 
 def main(
-    classified_path: str = "search_results_raw.ndjson",
+    classified_path: str = "search_results_classified.ndjson",
     output_path: str = "chosen_seeds.ndjson",
 ) -> None:
     """
