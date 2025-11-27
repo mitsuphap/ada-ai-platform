@@ -238,6 +238,7 @@ def call_gemini_extract(
     label: str,
     title: str,
     user_request: str,
+    custom_parser_instructions: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
 
     model = genai.GenerativeModel(
@@ -255,7 +256,10 @@ def call_gemini_extract(
     phone_candidates = extract_phone_candidates(html_snippet)
     email_candidates = extract_email_candidates(html_snippet)
 
-    prompt = f"""{PARSER_INSTRUCTIONS}
+    # Use custom instructions if provided, otherwise use default
+    parser_instructions = custom_parser_instructions if custom_parser_instructions else PARSER_INSTRUCTIONS
+
+    prompt = f"""{parser_instructions}
 
 User request:
 - {user_request}
@@ -314,6 +318,7 @@ def llm_scrape_from_seeds(
     output_path: str = OUTPUT_PATH_DEFAULT,
     delay_seconds: float = 1.0,
     user_request: str = "Extract a general profile of each entity.",
+    custom_parser_instructions: Optional[str] = None,
 ) -> None:
 
     seeds = load_ndjson(seeds_path)
@@ -349,6 +354,7 @@ def llm_scrape_from_seeds(
                 label=label,
                 title=title,
                 user_request=user_request,
+                custom_parser_instructions=custom_parser_instructions,
             )
 
             now_str = time.strftime("%Y-%m-%dT%H:%M:%S%z")
