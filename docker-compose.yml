@@ -86,6 +86,9 @@ services:
       - ./Implementation/scraper/output:/data
       # Mount scraper source code so backend can import it
       - ./Implementation/scraper:/app/scraper:ro
+      # Mount backend code for development (allows code changes without rebuild)
+      - ./Implementation/backend/main.py:/app/main.py
+      - ./Implementation/backend/app:/app/app
 
   adminer:
     image: adminer
