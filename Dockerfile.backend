@@ -1,0 +1,22 @@
+FROM python:3.11-slim
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
+WORKDIR /app
+
+# Copy backend requirements
+COPY Implementation/backend/requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy backend code
+COPY Implementation/backend/app ./app
+COPY Implementation/backend/main.py ./main.py
+
+# Copy scraper code (needed by backend)
+COPY Implementation/scraper ./scraper
+
+# Create output directory for scraper
+RUN mkdir -p /data
+
+EXPOSE 8000
+CMD ["sh", "-c", "uvicorn main:app --host 0.0.0.0 --port ${PORT:-8000}"]
+
