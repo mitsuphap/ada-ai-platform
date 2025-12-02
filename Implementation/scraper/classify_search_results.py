@@ -19,7 +19,12 @@ if not GEMINI_API_KEY:
     )
 
 genai.configure(api_key=GEMINI_API_KEY)
-model = genai.GenerativeModel("models/gemini-2.5-flash")
+model = genai.GenerativeModel(
+    "models/gemini-2.5-flash",
+    generation_config={
+        "temperature": 0.0,  # Set to 0 for more consistent/deterministic classification
+    },
+)
 
 
 # Brief description of what these search results are about
@@ -148,6 +153,9 @@ def classify_with_llm(raw_path, output_path, batch_size=10):
     print(f"Loaded {len(rows)} raw results")
 
     out_file = Path(output_path)
+    passed_count = 0
+    total_classified = 0
+    
     with out_file.open("w", encoding="utf-8") as f_out:
         for idx, batch in enumerate(chunk_list(rows, batch_size)):
             print(f"[LLM] Processing batch {idx}")
@@ -175,19 +183,26 @@ def classify_with_llm(raw_path, output_path, batch_size=10):
                 r["label"] = info.get("label", "other")
                 r["confidence"] = info.get("confidence", 0.0)
                 r["reason"] = info.get("reason", "no reason provided")
+                total_classified += 1
 
                 # Filter logic: keep only certain labels if configured
                 if KEEP_LABELS is None:
                     # Keep everything
                     f_out.write(json.dumps(r, ensure_ascii=False) + "\n")
+                    passed_count += 1
                 else:
                     if (
                         r["label"] in KEEP_LABELS
                         and r["confidence"] >= MIN_CONFIDENCE
                     ):
                         f_out.write(json.dumps(r, ensure_ascii=False) + "\n")
+                        passed_count += 1
+                    else:
+                        # Debug: print why result was filtered out
+                        print(f"  Filtered out: {r['url'][:60]}... label={r['label']}, confidence={r['confidence']:.2f}")
 
     print(f"Classification complete. Results saved to {output_path}")
+    print(f"  Total classified: {total_classified}, Passed filter: {passed_count} (confidence >= {MIN_CONFIDENCE}, labels: {KEEP_LABELS})")
 
 
 if __name__ == "__main__":

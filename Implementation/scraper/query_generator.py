@@ -70,10 +70,18 @@ def generate_queries_with_gemini(user_text: str, n: int = 5) -> list[str]:
 """
 
     try:
-        resp = model.generate_content(prompt)
+        # Create model with JSON response format to ensure consistent parsing
+        json_model = genai.GenerativeModel(
+            "models/gemini-2.5-flash",
+            generation_config={
+                "response_mime_type": "application/json",
+                "temperature": 0.0,
+            },
+        )
+        resp = json_model.generate_content(prompt)
         raw = (resp.text or "").strip()
 
-        # Since we forced application/json, resp.text should already be JSON
+        # Parse JSON response (now guaranteed to be JSON format)
         data = json.loads(raw)
 
         # Keep only strings

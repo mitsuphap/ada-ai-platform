@@ -58,13 +58,44 @@ EMAIL_REGEX = re.compile(
     r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}"
 )
 
+def is_valid_phone(phone_str: str) -> bool:
+    """Validate that a phone number string is actually a phone number, not a date or other number."""
+    # Remove all non-digits
+    digits = re.sub(r"\D", "", phone_str)
+    
+    # Must have 7-15 digits
+    if not (7 <= len(digits) <= 15):
+        return False
+    
+    # Reject if it looks like a year range (e.g., "2012-2014")
+    if re.search(r'\d{4}[\s\-]+\d{4}', phone_str):
+        return False
+    
+    # Reject if it's just 4 digits (likely a year)
+    if len(digits) == 4 and re.match(r'^\d{4}$', phone_str.strip()):
+        return False
+    
+    # Reject if it contains common date patterns
+    if re.search(r'(19|20)\d{2}', phone_str) and len(digits) <= 8:
+        return False
+    
+    # Must contain at least one space, dash, or parenthesis (typical phone formatting)
+    # OR be a long international number
+    if len(digits) >= 10:
+        if not re.search(r'[\s\-\(\)]', phone_str):
+            # Long number without formatting might be valid international
+            return True
+        return True
+    
+    # For shorter numbers, require some formatting
+    return bool(re.search(r'[\s\-\(\)]', phone_str))
+
 def extract_phone_candidates(text: str) -> List[str]:
+    """Extract phone numbers from text, filtering out false positives like dates."""
     matches = {m.group(0).strip() for m in PHONE_REGEX.finditer(text)}
-    # keep only reasonable lengths (strip non-digits to check)
     cleaned = []
     for m in matches:
-        digits = re.sub(r"\D", "", m)
-        if 7 <= len(digits) <= 15:
+        if is_valid_phone(m):
             cleaned.append(m)
     return cleaned
 
@@ -170,12 +201,22 @@ you MUST try very hard to find contact details.
 3. If ANY email address appears anywhere in the page:
    - Set "contact_email" to that value (or the most general one, e.g. info@, submissions@).
    - Do NOT leave "contact_email" null in that case.
+   - For directory/list pages: Try to match emails to specific people by looking for patterns
+     like "Name: [name], Email: [email]" or "[name] ([email])" or "[email] ([name])".
 
 4. If ANY phone number appears anywhere:
    - Set "phone" to that value (or the most general one).
    - Do NOT leave "phone" null in that case.
+   - IMPORTANT: Only extract actual phone numbers (7-15 digits with proper formatting).
+   - REJECT date ranges like "2012-2014", years like "2024", or other non-phone numbers.
 
-5. Only set "contact_email": null and "phone": null if there is truly no email
+5. For directory/list pages with multiple people:
+   - Extract each person as a separate entity.
+   - If emails/phones are listed but not clearly matched to names, try to infer matches
+     based on proximity in the text (emails near names).
+   - If contact info is mentioned but not directly associated, include it in "extra" field.
+
+6. Only set "contact_email": null and "phone": null if there is truly no email
    or phone number in the provided text.
 
 Even when the user request is only about emails, you may still fill other fields
@@ -190,10 +231,18 @@ FOCUSING ON THE USER REQUEST
 
   * For a single-entity page:
     - return one JSON object with at least "name" and "contact_email".
+    - Search the ENTIRE page content, including footers, sidebars, and contact sections.
+    - Look for email patterns near the person's name or title.
 
   * For a directory/list page:
-    - return an array of objects, each with at least "name" and "contact_email"
-      where available.
+    - return an array of objects, each with at least "name" and "contact_email" where available.
+    - Extract ALL people mentioned, even if some don't have emails.
+    - For each person, try to find their associated email by:
+      * Looking for patterns like "Name: [name], Email: [email]"
+      * Finding emails near their name in the text
+      * Checking if there's a general contact email that could be used
+    - If emails aren't on this page, check if there are links to individual profile pages
+      and mention this in the "extra" field.
 
 - If the user cares about prices only, focus on price and price_numeric.
 - If the user cares about location only, focus on address/city/country.
@@ -233,6 +282,7 @@ def fetch_html(url: str, timeout: int = 15) -> Optional[str]:
 def prepare_html_for_llm(raw_html: str) -> str:
     soup = BeautifulSoup(raw_html, "html.parser")
 
+    # Try to get main content first
     main = (
         soup.select_one("article")
         or soup.select_one("div.entry-content")
@@ -240,7 +290,26 @@ def prepare_html_for_llm(raw_html: str) -> str:
         or soup.body
     )
 
-    text = main.get_text("\n", strip=True) if main else soup.get_text("\n", strip=True)
+    main_text = main.get_text("\n", strip=True) if main else ""
+    
+    # Also extract footer and contact sections (where emails often are)
+    footer = soup.select_one("footer")
+    footer_text = footer.get_text("\n", strip=True) if footer else ""
+    
+    # Look for contact-related sections
+    contact_sections = soup.select("div.contact, section.contact, div#contact, section#contact, .contact-info, .contact-details")
+    contact_text = "\n".join([s.get_text("\n", strip=True) for s in contact_sections])
+    
+    # Combine all text
+    text = main_text
+    if footer_text:
+        text += "\n\n--- FOOTER ---\n" + footer_text
+    if contact_text:
+        text += "\n\n--- CONTACT SECTIONS ---\n" + contact_text
+    
+    # If still no text, fall back to full page
+    if not text.strip():
+        text = soup.get_text("\n", strip=True)
 
     # If it's huge, keep both the beginning and the end (footer)
     if len(text) > MAX_HTML_CHARS:
@@ -324,16 +393,25 @@ HTML content:
             raise ValueError("LLM returned invalid JSON type")
 
         # Fallback: if phone/email missing but regex found candidates, fill them
+        # But only if user request specifically asks for contact info
+        user_wants_contact = any(keyword in user_request.lower() for keyword in 
+                                 ["email", "contact", "phone", "reach", "address", "phone number"])
+        
         best_phone = phone_candidates[0] if phone_candidates else None
         best_email = email_candidates[0] if email_candidates else None
 
         for ent in entities:
             phone_val = ent.get("phone")
-            if best_phone and (phone_val in (None, "", "null")):
-                ent["phone"] = best_phone
+            # Only use regex fallback if LLM didn't extract phone AND user wants contact info
+            # AND the phone is actually valid (not a date)
+            if best_phone and (phone_val in (None, "", "null")) and user_wants_contact:
+                # Double-check it's a valid phone before using
+                if is_valid_phone(best_phone):
+                    ent["phone"] = best_phone
 
             email_val = ent.get("contact_email") or ent.get("email")
-            if best_email and (email_val in (None, "", "null")):
+            # Only use regex fallback if LLM didn't extract email AND user wants contact info
+            if best_email and (email_val in (None, "", "null")) and user_wants_contact:
                 ent["contact_email"] = best_email
 
         return entities

@@ -252,21 +252,12 @@ def scrape_seeds(request: ScrapeRequest):
         if not seeds_path.exists():
             raise HTTPException(status_code=404, detail="chosen_seeds.ndjson not found. Please select URLs first.")
         
-        # Build user_request from topic and data_specification for better context
-        user_request_parts = []
-        if request.topic:
-            user_request_parts.append(request.topic)
-        if request.data_specification:
-            user_request_parts.append(f"Focus on extracting: {request.data_specification}")
+        # Build user_request (use topic directly, like terminal)
+        user_request = request.topic if request.topic else "Extract a general profile of each entity."
         
-        if user_request_parts:
-            user_request = ". ".join(user_request_parts) + "."
-        else:
-            user_request = "Extract a general profile of each entity."
-        
-        # Modify PARSER_INSTRUCTIONS if data_specification provided
+        # Modify PARSER_INSTRUCTIONS if data_specification provided (but don't duplicate topic)
         custom_instructions = None
-        if request.data_specification:
+        if request.data_specification and request.data_specification != request.topic:
             custom_instructions = PARSER_INSTRUCTIONS + f"\n\nIMPORTANT: The user specifically wants to extract: {request.data_specification}. Make sure to prioritize and extract this information prominently. If this information is not found on the page, set the relevant field(s) to null but ensure you thoroughly search for it."
         
         # Scrape from chosen_seeds.ndjson, save to discovered_sites.ndjson
@@ -319,21 +310,12 @@ def scrape_selected_urls(request: LegacyScrapeRequest, http_request: Request):
         with tempfile.NamedTemporaryFile(mode='w', suffix='.ndjson', delete=False) as tmp_output:
             output_path = tmp_output.name
         
-        # Build user_request from topic and data_specification for better context
-        user_request_parts = []
-        if request.topic:
-            user_request_parts.append(request.topic)
-        if request.data_specification:
-            user_request_parts.append(f"Focus on extracting: {request.data_specification}")
+        # Build user_request (use topic directly, like terminal)
+        user_request = request.topic if request.topic else "Extract a general profile of each entity."
         
-        if user_request_parts:
-            user_request = ". ".join(user_request_parts) + "."
-        else:
-            user_request = "Extract a general profile of each entity."
-        
-        # Modify PARSER_INSTRUCTIONS if data_specification provided
+        # Modify PARSER_INSTRUCTIONS if data_specification provided (but don't duplicate topic)
         custom_instructions = None
-        if request.data_specification:
+        if request.data_specification and request.data_specification != request.topic:
             custom_instructions = PARSER_INSTRUCTIONS + f"\n\nIMPORTANT: The user specifically wants to extract: {request.data_specification}. Make sure to prioritize and extract this information prominently. If this information is not found on the page, set the relevant field(s) to null but ensure you thoroughly search for it."
         
         # Scrape with topic context
@@ -386,7 +368,7 @@ def search_and_scrape_auto(request: ScrapeRequest):
         raw_results_path = OUTPUT_DIR / "search_results_raw.ndjson"
         call_google_search_save(queries, output_path=str(raw_results_path), results_per_query=10)
         
-        # Step 2: Classify search results
+        # Step 2: Classify search results (already filters by confidence >= 0.95)
         classified_results_path = OUTPUT_DIR / "search_results_classified.ndjson"
         classify_with_llm(
             raw_path=str(raw_results_path),
@@ -394,88 +376,48 @@ def search_and_scrape_auto(request: ScrapeRequest):
             batch_size=10
         )
         
-        # Step 3: Filter by confidence >= 0.95 and create seeds automatically
-        seeds_path = OUTPUT_DIR / "chosen_seeds.ndjson"
-        seeds = []
-        seen_urls = set()
-        all_candidates = []  # Collect all candidates first
-        
-        if classified_results_path.exists():
-            with open(classified_results_path, 'r', encoding='utf-8') as f:
-                for line in f:
-                    if line.strip():
-                        result = json.loads(line)
-                        confidence = result.get("confidence", 0.0)
-                        url = result.get("url", "")
-                        rank = result.get("rank", 999)  # Default to high rank if missing
-                        
-                        # Filter: confidence >= 0.95 and not duplicate
-                        if confidence >= 0.95 and url:
-                            normalized_url = url.rstrip('/').lower()
-                            if normalized_url not in seen_urls:
-                                seen_urls.add(normalized_url)
-                                all_candidates.append({
-                                    "url": url,
-                                    "label": result.get("label", "highly_relevant"),
-                                    "title": result.get("title", url),
-                                    "source_query": result.get("query", "auto_selected"),
-                                    "confidence": confidence,
-                                    "rank": rank
-                                })
-        
-        # Sort by confidence (descending) then by rank (ascending) and take top 5
-        all_candidates.sort(key=lambda x: (-x["confidence"], x["rank"]))
-        total_available = len(all_candidates)
-        seeds = all_candidates[:5]  # Limit to top 5
-        
-        # Save all candidates to a file for potential future scraping (with metadata)
-        all_candidates_path = OUTPUT_DIR / "all_candidates.ndjson"
-        with open(all_candidates_path, 'w', encoding='utf-8') as f:
-            for candidate in all_candidates:
-                f.write(json.dumps(candidate, ensure_ascii=False) + '\n')
-        
-        # Save filtered seeds (only top 5) for current scraping
-        with open(seeds_path, 'w', encoding='utf-8') as f:
-            for seed in seeds:
-                # Remove confidence and rank from seed dict before saving
-                seed_to_save = {
-                    "url": seed["url"],
-                    "label": seed["label"],
-                    "title": seed["title"],
-                    "source_query": seed["source_query"]
-                }
-                f.write(json.dumps(seed_to_save, ensure_ascii=False) + '\n')
-        
-        if len(seeds) == 0:
+        # Step 3: Check if we have any classified results
+        # Note: classify_with_llm already filters by confidence >= 0.95 and KEEP_LABELS
+        # So search_results_classified.ndjson contains only filtered results (like terminal workflow)
+        if not classified_results_path.exists():
             return ScrapeResponse(
                 results=[],
-                message=f"No results found with confidence >= 0.95. Found {len(all_candidates)} URLs to scrape.",
-                total_available_links=len(all_candidates),
+                message="No classified results found. Classification may have failed.",
+                total_available_links=0,
                 scraped_count=0,
                 has_more=False
             )
         
-        # Step 4: Build user_request for scraping
-        user_request_parts = []
-        if request.topic:
-            user_request_parts.append(request.topic)
-        if request.data_specification:
-            user_request_parts.append(f"Focus on extracting: {request.data_specification}")
+        # Count total available links for reporting
+        total_available = 0
+        with open(classified_results_path, 'r', encoding='utf-8') as f:
+            for line in f:
+                if line.strip():
+                    total_available += 1
         
-        if user_request_parts:
-            user_request = ". ".join(user_request_parts) + "."
-        else:
-            user_request = "Extract a general profile of each entity."
+        if total_available == 0:
+            return ScrapeResponse(
+                results=[],
+                message="No results found with confidence >= 0.95 after classification.",
+                total_available_links=0,
+                scraped_count=0,
+                has_more=False
+            )
         
-        # Modify PARSER_INSTRUCTIONS if data_specification provided
+        # Step 4: Build user_request for scraping (use topic directly, like terminal)
+        # Match terminal workflow: pass the full topic as user_request
+        user_request = request.topic if request.topic else "Extract a general profile of each entity."
+        
+        # Modify PARSER_INSTRUCTIONS if data_specification provided (but don't duplicate topic)
         custom_instructions = None
-        if request.data_specification:
+        if request.data_specification and request.data_specification != request.topic:
             custom_instructions = PARSER_INSTRUCTIONS + f"\n\nIMPORTANT: The user specifically wants to extract: {request.data_specification}. Make sure to prioritize and extract this information prominently. If this information is not found on the page, set the relevant field(s) to null but ensure you thoroughly search for it."
         
-        # Step 5: Scrape automatically
+        # Step 5: Scrape automatically from search_results_classified.ndjson (like terminal)
+        # Use classified file directly instead of creating chosen_seeds.ndjson
         output_path = OUTPUT_DIR / "discovered_sites.ndjson"
         llm_scrape_from_seeds(
-            seeds_path=str(seeds_path),
+            seeds_path=str(classified_results_path),  # Read directly from classified file (like terminal)
             output_path=str(output_path),
             delay_seconds=1.0,
             user_request=user_request,
@@ -492,10 +434,10 @@ def search_and_scrape_auto(request: ScrapeRequest):
         
         return ScrapeResponse(
             results=results,
-            message=f"Scraped top {len(seeds)} URLs (confidence >= 0.95). {total_available} total links available.",
+            message=f"Scraped {len(results)} URLs (confidence >= 0.95). {total_available} total links were available.",
             total_available_links=total_available,
             scraped_count=len(results),
-            has_more=(total_available > len(seeds))
+            has_more=False  # All filtered results are scraped in one go (like terminal)
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -562,21 +504,12 @@ def scrape_more(request: ScrapeRequest):
                 }
                 f.write(json.dumps(seed, ensure_ascii=False) + '\n')
         
-        # Build user_request for scraping
-        user_request_parts = []
-        if request.topic:
-            user_request_parts.append(request.topic)
-        if request.data_specification:
-            user_request_parts.append(f"Focus on extracting: {request.data_specification}")
+        # Build user_request for scraping (use topic directly, like terminal)
+        user_request = request.topic if request.topic else "Extract a general profile of each entity."
         
-        if user_request_parts:
-            user_request = ". ".join(user_request_parts) + "."
-        else:
-            user_request = "Extract a general profile of each entity."
-        
-        # Modify PARSER_INSTRUCTIONS if data_specification provided
+        # Modify PARSER_INSTRUCTIONS if data_specification provided (but don't duplicate topic)
         custom_instructions = None
-        if request.data_specification:
+        if request.data_specification and request.data_specification != request.topic:
             custom_instructions = PARSER_INSTRUCTIONS + f"\n\nIMPORTANT: The user specifically wants to extract: {request.data_specification}. Make sure to prioritize and extract this information prominently. If this information is not found on the page, set the relevant field(s) to null but ensure you thoroughly search for it."
         
         # Scrape this batch (append to existing file)
