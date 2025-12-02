@@ -32,7 +32,13 @@ app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 # --- CORS: enable during dev; tighten origins later ---
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000", "*"],
+    allow_origins=[
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+        "https://ada-frontend.fly.dev",  # Fly.io frontend
+        "https://*.vercel.app",  # Vercel frontend (wildcard for preview deployments)
+        "*"  # Keep for development, remove in production
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -48,9 +54,8 @@ def read_root():
 
 @app.get("/health")
 def health_check():
-    # Touch the DB so health reflects actual readiness
-    with get_engine().connect() as conn:
-        conn.execute(text("SELECT 1"))
+    # Simple health check - app is healthy if it can respond
+    # Don't check database here to keep health check fast
     return {"status": "ok"}
 
 @app.get("/debug/schema/{table_name}")
@@ -84,8 +89,14 @@ def debug_table_schema(table_name: str, db: Session = Depends(get_db)):
 @app.get("/auto/tables")
 def list_auto_tables(db: Session = Depends(get_db)):
     """Return the list of auto-generated tables after exclusions"""
-    tables = get_available_auto_tables(db)
-    return {"tables": tables, "count": len(tables)}
+    try:
+        tables = get_available_auto_tables(db)
+        return {"tables": tables, "count": len(tables)}
+    except Exception as e:
+        raise HTTPException(
+            status_code=503,
+            detail=f"Database not available. Scraper endpoints (/scraper/*) are still functional. Error: {str(e)}"
+        )
 
 # Scraper API endpoints - Define models and routes FIRST, before path setup
 # Request/Response models
@@ -559,12 +570,21 @@ async def startup_event():
     """Generate API routes automatically on startup with fresh schema introspection"""
     db = None
     try:
-        # Force engine to dispose any cached connections to ensure fresh schema
+        # Try to connect to database
+        print("🔄 Attempting to connect to database...")
         engine = get_engine()
-        engine.dispose()
         
-        # Get fresh database session
-        db = next(get_db())
+        # Test connection first
+        try:
+            engine.dispose()
+            db = next(get_db())
+            # Test query
+            db.execute(text("SELECT 1"))
+            print("   ✅ Database connection successful")
+        except Exception as db_error:
+            print(f"   ⚠️  Database not available: {db_error}")
+            print("   ℹ️  App will run in scraper-only mode (database endpoints disabled)")
+            return  # Exit early, scraper endpoints will still work
         
         # Ensure schema migrations are applied (e.g., extracted_at columns)
         # This ensures new columns added via migration files are present
@@ -600,7 +620,8 @@ async def startup_event():
         import traceback
         print(f"⚠️  Warning: Auto-generation failed: {e}")
         print(f"   Full error: {traceback.format_exc()}")
-        # Fall back to manual routers only
+        print("   ℹ️  App will run in scraper-only mode (database endpoints disabled)")
+        # Fall back to manual routers only - scraper endpoints still work
     finally:
         # Always close the database session
         if db:
