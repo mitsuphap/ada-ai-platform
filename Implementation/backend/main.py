@@ -30,16 +30,11 @@ app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 # --- CORS: enable during dev; tighten origins later ---
+# Note: FastAPI CORS doesn't support wildcards like "*.vercel.app", use "*" for all origins
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:3000",
-        "http://127.0.0.1:3000",
-        "https://ada-frontend.fly.dev",  # Fly.io frontend
-        "https://*.vercel.app",  # Vercel frontend (wildcard for preview deployments)
-        "*"  # Keep for development, remove in production
-    ],
-    allow_credentials=True,
+    allow_origins=["*"],  # Allow all origins for now (can restrict later)
+    allow_credentials=False,  # Must be False when using "*" for origins
     allow_methods=["*"],
     allow_headers=["*"],
 )
