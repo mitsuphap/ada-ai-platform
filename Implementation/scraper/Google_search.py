@@ -3,6 +3,13 @@ import requests
 import json
 from datetime import datetime, timezone
 from urllib.parse import urlparse, urlunparse
+from typing import Optional, Any
+
+# Import timing utilities (optional, will work without it)
+try:
+    from benchmark_utils import PerformanceTimer
+except ImportError:
+    PerformanceTimer = None
 
 API_KEY = os.getenv("GOOGLE_CSE_API_KEY")
 CX = os.getenv("GOOGLE_CSE_CX")
@@ -69,12 +76,68 @@ def normalize_url(url: str) -> str:
 
 def call_google_search_save(
     queries,
-    output_path="search_results_raw.ndjson",
+    output_path="output/search_results_raw.ndjson",
     results_per_query=10,
+    timer: Optional[Any] = None,  # PerformanceTimer if available
 ):
     seen_urls = set()  # <- track normalized URLs across ALL queries
+    
+    # Ensure output directory exists
+    from pathlib import Path
+    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+    
+    if timer:
+        timer.add_metadata("num_queries", len(queries))
+        timer.add_metadata("results_per_query", results_per_query)
 
-    with open(output_path, "w", encoding="utf-8") as f_out:
+    all_results = []
+    
+    if timer:
+        with timer.stage("google_cse_api_calls"):
+            for q in queries:
+                print(f"[CSE] Query: {q}")
+                params = {
+                    "key": API_KEY,
+                    "cx": CX,
+                    "q": q,
+                    "num": results_per_query,
+                }
+                r = requests.get(CSE_URL, params=params, timeout=20)
+                r.raise_for_status()
+                data = r.json()
+
+                items = data.get("items", [])
+                rank = 1  # rank per query
+
+                for item in items:
+                    result_url = item.get("link")
+                    if not result_url:
+                        continue
+
+                    if is_blocked(result_url):
+                        continue
+
+                    norm = normalize_url(result_url)
+                    if norm in seen_urls:
+                        # already saw this page from a previous query, skip duplicate
+                        continue
+
+                    seen_urls.add(norm)
+
+                    now = datetime.now(timezone.utc).isoformat()
+                    row = {
+                        "query": q,
+                        "rank": rank,
+                        "title": item.get("title"),
+                        "url": result_url,
+                        "normalized_url": norm,
+                        "snippet": item.get("snippet", ""),
+                        "source": "google_cse",
+                        "scraped_at": now,
+                    }
+                    all_results.append(row)
+                    rank += 1
+    else:
         for q in queries:
             print(f"[CSE] Query: {q}")
             params = {
@@ -116,7 +179,16 @@ def call_google_search_save(
                     "source": "google_cse",
                     "scraped_at": now,
                 }
-                f_out.write(json.dumps(row, ensure_ascii=False) + "\n")
+                all_results.append(row)
                 rank += 1
 
-    print(f"Saved search results to {output_path}")
+    # Write all results
+    with open(output_path, "w", encoding="utf-8") as f_out:
+        for row in all_results:
+            f_out.write(json.dumps(row, ensure_ascii=False) + "\n")
+
+    if timer:
+        timer.add_metadata("total_results", len(all_results))
+        timer.add_metadata("unique_urls", len(seen_urls))
+    
+    print(f"Saved {len(all_results)} search results to {output_path}")

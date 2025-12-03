@@ -1,0 +1,34 @@
+{
+  "name": "pipeline_run",
+  "metadata": {
+    "start_time": "2025-12-03T13:44:56.012943",
+    "queries_generated": 5,
+    "num_queries": 5,
+    "results_per_query": 10,
+    "total_results": 44,
+    "unique_urls": 44,
+    "batch_size": 10,
+    "num_results": 44,
+    "results_passed": 14,
+    "total_classified": 44,
+    "num_seeds": 14,
+    "max_workers": 10,
+    "user_request": "Give me the contact information for Vice Presidents at University of Wisconsin-Madison",
+    "urls_fetched": 14,
+    "urls_failed": 0,
+    "records_saved": 70,
+    "total_time": 182.29326462745667,
+    "end_time": "2025-12-03T13:47:58.306210"
+  },
+  "stages": {
+    "query_generation": 3.6696677207946777,
+    "google_cse_api_calls": 3.058134078979492,
+    "google_search": 3.0644571781158447,
+    "llm_classification": 49.41786789894104,
+    "classification": 49.42291522026062,
+    "fetch_html": 5.929938793182373,
+    "llm_extraction": 120.19718980789185,
+    "scraping": 126.1333258152008
+  },
+  "total_time": 182.29326462745667
+}

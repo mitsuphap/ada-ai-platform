@@ -25,7 +25,11 @@ def main():
         print(" -", q)
 
     #ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%MZ")
-    output_path = f"search_results_raw.ndjson"
+    output_path = f"output/search_results_raw.ndjson"
+    
+    # Ensure output directory exists
+    from pathlib import Path
+    Path("output").mkdir(exist_ok=True)
 
     print(f"Running Google CSE search, saving to {output_path} ...")
     call_google_search_save(queries, output_path=output_path)

@@ -20,8 +20,18 @@ from bs4 import BeautifulSoup
 import requests
 import google.generativeai as genai
 
-SEEDS_PATH_DEFAULT = "search_results_classified.ndjson"
-OUTPUT_PATH_DEFAULT = "discovered_sites.ndjson"
+# Import timing utilities (optional, will work without it)
+try:
+    from benchmark.benchmark_utils import PerformanceTimer
+except ImportError:
+    # Fallback for when benchmark module is not available
+    try:
+        from benchmark_utils import PerformanceTimer
+    except ImportError:
+        PerformanceTimer = None
+
+SEEDS_PATH_DEFAULT = "output/search_results_classified.ndjson"
+OUTPUT_PATH_DEFAULT = "output/discovered_sites.ndjson"
 
 # --- API KEYS -------------------------------------------------
 # Use a dedicated GEMINI_API_KEY here (NOT the CSE key)
@@ -404,7 +414,22 @@ HTML content:
         resp = model.generate_content(prompt)
         raw = (resp.text or "").strip()
         clean = strip_code_fence(raw)
-        data = json.loads(clean)
+        
+        # Try to parse JSON, handle common issues
+        try:
+            data = json.loads(clean)
+        except json.JSONDecodeError as e:
+            # If JSON parsing fails, try to extract JSON from the response
+            # Sometimes LLM wraps JSON in markdown or adds extra text
+            # Try to find JSON object or array in the response
+            json_match = re.search(r'(\[.*\]|\{.*\})', clean, re.DOTALL)
+            if json_match:
+                try:
+                    data = json.loads(json_match.group(1))
+                except:
+                    raise ValueError(f"Failed to parse JSON from LLM response. Error: {e}. Raw response (first 500 chars): {clean[:500]}")
+            else:
+                raise ValueError(f"Failed to parse JSON from LLM response. Error: {e}. Raw response (first 500 chars): {clean[:500]}")
 
         # Normalize to list
         if isinstance(data, dict):
@@ -452,64 +477,118 @@ def llm_scrape_from_seeds(
     user_request: str = "Extract a general profile of each entity.",
     custom_parser_instructions: Optional[str] = None,
     max_workers: int = 10,
+    llm_workers: int = 5,  # NEW: separate workers for LLM calls
+    timer: Optional[Any] = None,  # PerformanceTimer if available
 ) -> None:
 
+    # Ensure output directory exists
+    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+    
     seeds = load_ndjson(seeds_path)
     print(f"Loaded {len(seeds)} seeds from {seeds_path}")
 
+    if timer:
+        timer.add_metadata("num_seeds", len(seeds))
+        timer.add_metadata("max_workers", max_workers)
+        timer.add_metadata("llm_workers", llm_workers)
+        timer.add_metadata("user_request", user_request)
+
     # 1) PARALLEL FETCH ALL HTML
-    print(f"Fetching HTML for {len(seeds)} URLs in parallel (max_workers={max_workers})...")
-    seed_html_pairs = fetch_all_html(seeds, max_workers=max_workers)
+    if timer:
+        with timer.stage("fetch_html"):
+            print(f"Fetching HTML for {len(seeds)} URLs in parallel (max_workers={max_workers})...")
+            seed_html_pairs = fetch_all_html(seeds, max_workers=max_workers)
+    else:
+        print(f"Fetching HTML for {len(seeds)} URLs in parallel (max_workers={max_workers})...")
+        seed_html_pairs = fetch_all_html(seeds, max_workers=max_workers)
+
+    if timer:
+        urls_fetched = len([h for _, h in seed_html_pairs if h is not None])
+        timer.add_metadata("urls_fetched", urls_fetched)
+        timer.add_metadata("urls_failed", len(seed_html_pairs) - urls_fetched)
 
     out_file = Path(output_path)
     total = len(seed_html_pairs)
-    with out_file.open("w", encoding="utf-8") as f_out:
-        for idx, (item, html) in enumerate(seed_html_pairs, start=1):
-            url = item.get("url")
-            label = item.get("label", "unknown")
-            title = item.get("title", "")
-            source_query = item.get("source_query") or item.get("query")
-
-            print(f"\n[{idx}/{total}] Processing {url} (label={label})")
-
-            if html is None:
-                record = {
-                    "url": url,
-                    "label": label,
-                    "title": title,
-                    "source_query": source_query,
-                    "scraped_status": "http_error",
-                    "scraped_at": None,
-                    "llm_payload": None,
-                }
+    
+    def process_one_url(item_html_pair):
+        """Process one URL: extract with LLM"""
+        item, html = item_html_pair
+        url = item.get("url")
+        label = item.get("label", "unknown")
+        title = item.get("title", "")
+        source_query = item.get("source_query") or item.get("query")
+        
+        if html is None:
+            return [{
+                "url": url,
+                "label": label,
+                "title": title,
+                "source_query": source_query,
+                "scraped_status": "http_error",
+                "scraped_at": None,
+                "llm_payload": None,
+            }]
+        
+        print(f"[LLM] Extracting structured data for {url} ...")
+        entities = call_gemini_extract(
+            html,
+            url=url,
+            label=label,
+            title=title,
+            user_request=user_request,
+            custom_parser_instructions=custom_parser_instructions,
+        )
+        
+        now_str = time.strftime("%Y-%m-%dT%H:%M:%S%z")
+        records = []
+        for ent in entities:
+            records.append({
+                "url": url,
+                "label": label,
+                "title": title,
+                "source_query": source_query,
+                "scraped_status": "ok",
+                "scraped_at": now_str,
+                "llm_payload": ent,
+            })
+        return records
+    
+    # 2) PARALLEL LLM PROCESSING (always use parallel, timer is optional)
+    all_records = []
+    
+    def run_parallel_processing():
+        print(f"Processing {total} URLs with LLM in parallel (llm_workers={llm_workers})...")
+        with ThreadPoolExecutor(max_workers=llm_workers) as executor:
+            future_to_pair = {
+                executor.submit(process_one_url, pair): idx 
+                for idx, pair in enumerate(seed_html_pairs, start=1)
+            }
+            for future in as_completed(future_to_pair):
+                idx = future_to_pair[future]
+                try:
+                    records = future.result()
+                    all_records.extend(records)
+                    print(f"[{idx}/{total}] Completed processing")
+                except Exception as e:
+                    print(f"Error processing URL {idx}: {e}")
+                    all_records.append({
+                        "scraped_status": "error",
+                        "error": str(e),
+                    })
+    
+    if timer:
+        with timer.stage("llm_extraction"):
+            run_parallel_processing()
+    else:
+        # Still use parallel processing even without timer
+        run_parallel_processing()
+    
+    # Write all records if using timer
+    if timer:
+        with out_file.open("w", encoding="utf-8") as f_out:
+            for record in all_records:
                 f_out.write(json.dumps(record, ensure_ascii=False) + "\n")
-                continue
-
-            print(f"[LLM] Extracting structured data for {url} ...")
-            entities = call_gemini_extract(
-                html,
-                url=url,
-                label=label,
-                title=title,
-                user_request=user_request,
-                custom_parser_instructions=custom_parser_instructions,
-            )
-
-            now_str = time.strftime("%Y-%m-%dT%H:%M:%S%z")
-            for ent in entities:
-                record = {
-                    "url": url,
-                    "label": label,
-                    "title": title,
-                    "source_query": source_query,
-                    "scraped_status": "ok",
-                    "scraped_at": now_str,
-                    "llm_payload": ent,
-                }
-                f_out.write(json.dumps(record, ensure_ascii=False) + "\n")
-
-            if delay_seconds > 0:
-                time.sleep(delay_seconds)
+        timer.add_metadata("records_saved", len(all_records))
 
 
 if __name__ == "__main__":
@@ -517,8 +596,16 @@ if __name__ == "__main__":
     request_user = input(
         "Describe what kind of information would you like to extract: "
     )
-    start =time.time()
     
-    llm_scrape_from_seeds(user_request=request_user)
-    end = time.time()
-    print(f"Completed in {end - start:.2f} seconds.")
+    # Use timer if available
+    if PerformanceTimer:
+        timer = PerformanceTimer("scraping")
+        timer.start()
+        llm_scrape_from_seeds(user_request=request_user, timer=timer)
+        timer.end()
+        timer.print_summary()
+    else:
+        start = time.time()
+        llm_scrape_from_seeds(user_request=request_user)
+        end = time.time()
+        print(f"Completed in {end - start:.2f} seconds.")

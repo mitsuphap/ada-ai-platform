@@ -270,9 +270,11 @@ def scrape_seeds(request: ScrapeRequest):
         llm_scrape_from_seeds(
             seeds_path=str(seeds_path),
             output_path=str(output_path),
-            delay_seconds=1.0,
+            delay_seconds=0.0,  # No delay needed with parallel processing
             user_request=user_request,
-            custom_parser_instructions=custom_instructions
+            custom_parser_instructions=custom_instructions,
+            max_workers=10,  # Parallel HTML fetching
+            llm_workers=10  # More parallel LLM workers for faster processing
         )
         
         # Load results
@@ -328,9 +330,11 @@ def scrape_selected_urls(request: LegacyScrapeRequest, http_request: Request):
         llm_scrape_from_seeds(
             seeds_path=seeds_path,
             output_path=output_path,
-            delay_seconds=1.0,
+            delay_seconds=0.0,  # No delay needed with parallel processing
             user_request=user_request,
-            custom_parser_instructions=custom_instructions
+            custom_parser_instructions=custom_instructions,
+            max_workers=10,  # Parallel HTML fetching
+            llm_workers=10  # More parallel LLM workers for faster processing
         )
         
         # Load results
@@ -354,6 +358,10 @@ def scrape_selected_urls(request: LegacyScrapeRequest, http_request: Request):
 @app.post("/scraper/search-and-scrape-auto", response_model=ScrapeResponse)
 def search_and_scrape_auto(request: ScrapeRequest):
     """Complete automated flow: Search -> Classify -> Filter (confidence >= 0.95) -> Auto-scrape"""
+    import time
+    start_time = time.time()
+    stage_times = {}
+    
     try:
         # Validate topic is provided
         if not request.topic:
@@ -365,6 +373,7 @@ def search_and_scrape_auto(request: ScrapeRequest):
         from llm_scrape_from_seeds import llm_scrape_from_seeds, PARSER_INSTRUCTIONS
         
         # Step 1: Generate queries and search
+        step_start = time.time()
         if request.data_specification:
             topic_with_spec = f"{request.topic}. Focus on finding: {request.data_specification}"
         else:
@@ -373,14 +382,20 @@ def search_and_scrape_auto(request: ScrapeRequest):
         queries = generate_queries_with_gemini(topic_with_spec, n=5)
         raw_results_path = OUTPUT_DIR / "search_results_raw.ndjson"
         call_google_search_save(queries, output_path=str(raw_results_path), results_per_query=10)
+        stage_times["query_generation_and_search"] = time.time() - step_start
+        print(f"[TIMING] Query generation + search: {stage_times['query_generation_and_search']:.2f}s")
         
         # Step 2: Classify search results (already filters by confidence >= 0.95)
+        step_start = time.time()
         classified_results_path = OUTPUT_DIR / "search_results_classified.ndjson"
         classify_with_llm(
             raw_path=str(raw_results_path),
             output_path=str(classified_results_path),
-            batch_size=10
+            batch_size=20,  # Larger batches = fewer API calls
+            max_workers=5  # More parallel workers for classification
         )
+        stage_times["classification"] = time.time() - step_start
+        print(f"[TIMING] Classification: {stage_times['classification']:.2f}s")
         
         # Step 3: Check if we have any classified results
         # Note: classify_with_llm already filters by confidence >= 0.95 and KEEP_LABELS
@@ -421,26 +436,38 @@ def search_and_scrape_auto(request: ScrapeRequest):
         
         # Step 5: Scrape automatically from search_results_classified.ndjson (like terminal)
         # Use classified file directly instead of creating chosen_seeds.ndjson
+        step_start = time.time()
         output_path = OUTPUT_DIR / "discovered_sites.ndjson"
         llm_scrape_from_seeds(
             seeds_path=str(classified_results_path),  # Read directly from classified file (like terminal)
             output_path=str(output_path),
-            delay_seconds=1.0,
+            delay_seconds=0.0,  # No delay needed with parallel processing
             user_request=user_request,
-            custom_parser_instructions=custom_instructions
+            custom_parser_instructions=custom_instructions,
+            max_workers=10,  # Parallel HTML fetching
+            llm_workers=10  # More parallel LLM workers for faster processing
         )
+        stage_times["scraping"] = time.time() - step_start
+        print(f"[TIMING] Scraping: {stage_times['scraping']:.2f}s")
         
         # Load and return results
+        step_start = time.time()
         results = []
         if output_path.exists():
             with open(output_path, 'r', encoding='utf-8') as f:
                 for line in f:
                     if line.strip():
                         results.append(json.loads(line))
+        stage_times["loading_results"] = time.time() - step_start
+        
+        total_time = time.time() - start_time
+        stage_times["total"] = total_time
+        print(f"[TIMING] Loading results: {stage_times['loading_results']:.2f}s")
+        print(f"[TIMING] TOTAL API TIME: {total_time:.2f}s ({total_time/60:.2f} minutes)")
         
         return ScrapeResponse(
             results=results,
-            message=f"Scraped {len(results)} URLs (confidence >= 0.95). {total_available} total links were available.",
+            message=f"Scraped {len(results)} URLs (confidence >= 0.95). {total_available} total links were available. Processing time: {total_time:.1f}s",
             total_available_links=total_available,
             scraped_count=len(results),
             has_more=False  # All filtered results are scraped in one go (like terminal)
@@ -523,9 +550,11 @@ def scrape_more(request: ScrapeRequest):
         llm_scrape_from_seeds(
             seeds_path=str(seeds_path),
             output_path=str(temp_output_path),
-            delay_seconds=1.0,
+            delay_seconds=0.0,  # No delay needed with parallel processing
             user_request=user_request,
-            custom_parser_instructions=custom_instructions
+            custom_parser_instructions=custom_instructions,
+            max_workers=10,  # Parallel HTML fetching
+            llm_workers=10  # More parallel LLM workers for faster processing
         )
         
         # Append new results to existing discovered_sites.ndjson
