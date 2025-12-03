@@ -1,8 +1,8 @@
 """
 llm_scrape_from_seeds.py
 
-Reads search_results_classified.ndjson (URLs picked by the user),
-downloads each page (now in PARALLEL), and uses Gemini to extract structured
+Reads chosen_seeds.ndjson (URLs picked by the user),
+downloads each page, and uses Gemini to extract structured
 info.
 
 Output: discovered_sites.ndjson (one JSON per URL/entity).
@@ -13,8 +13,6 @@ import json
 import time
 from pathlib import Path
 from typing import Dict, Any, List, Optional
-
-from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from bs4 import BeautifulSoup
 import requests
@@ -62,19 +60,25 @@ EMAIL_REGEX = re.compile(
 
 def is_valid_phone(phone_str: str) -> bool:
     """Validate that a phone number string is actually a phone number, not a date or other number."""
+    # Remove all non-digits
     digits = re.sub(r"\D", "", phone_str)
+    
     # Must have 7-15 digits
     if not (7 <= len(digits) <= 15):
         return False
+    
     # Reject if it looks like a year range (e.g., "2012-2014")
     if re.search(r'\d{4}[\s\-]+\d{4}', phone_str):
         return False
+    
     # Reject if it's just 4 digits (likely a year)
     if len(digits) == 4 and re.match(r'^\d{4}$', phone_str.strip()):
         return False
+    
     # Reject if it contains common date patterns
     if re.search(r'(19|20)\d{2}', phone_str) and len(digits) <= 8:
         return False
+    
     # Must contain at least one space, dash, or parenthesis (typical phone formatting)
     # OR be a long international number
     if len(digits) >= 10:
@@ -82,6 +86,7 @@ def is_valid_phone(phone_str: str) -> bool:
             # Long number without formatting might be valid international
             return True
         return True
+    
     # For shorter numbers, require some formatting
     return bool(re.search(r'[\s\-\(\)]', phone_str))
 
@@ -265,8 +270,6 @@ def load_ndjson(path: str) -> List[Dict[str, Any]]:
 
 def fetch_html(url: str, timeout: int = 15) -> Optional[str]:
     """Fetch HTML content from a URL."""
-    if not url:
-        return None
     try:
         resp = requests.get(url, headers=DEFAULT_HEADERS, timeout=timeout)
         resp.raise_for_status()
@@ -274,29 +277,6 @@ def fetch_html(url: str, timeout: int = 15) -> Optional[str]:
     except Exception as e:
         print(f"Error fetching {url}: {e}")
         return None
-
-
-def fetch_all_html(seeds: List[Dict[str, Any]], max_workers: int = 10):
-    """
-    Fetch HTML for all seeds in PARALLEL using ThreadPoolExecutor.
-    Returns a list of (seed, html) pairs.
-    """
-    results: List[tuple[Dict[str, Any], Optional[str]]] = []
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        future_to_seed = {
-            executor.submit(fetch_html, seed.get("url")): seed
-            for seed in seeds
-        }
-        for future in as_completed(future_to_seed):
-            seed = future_to_seed[future]
-            url = seed.get("url")
-            try:
-                html = future.result()
-            except Exception as e:
-                print(f"Error fetching {url}: {e}")
-                html = None
-            results.append((seed, html))
-    return results
 
 
 def prepare_html_for_llm(raw_html: str) -> str:
@@ -317,9 +297,7 @@ def prepare_html_for_llm(raw_html: str) -> str:
     footer_text = footer.get_text("\n", strip=True) if footer else ""
     
     # Look for contact-related sections
-    contact_sections = soup.select(
-        "div.contact, section.contact, div#contact, section#contact, .contact-info, .contact-details"
-    )
+    contact_sections = soup.select("div.contact, section.contact, div#contact, section#contact, .contact-info, .contact-details")
     contact_text = "\n".join([s.get_text("\n", strip=True) for s in contact_sections])
     
     # Combine all text
@@ -416,10 +394,8 @@ HTML content:
 
         # Fallback: if phone/email missing but regex found candidates, fill them
         # But only if user request specifically asks for contact info
-        user_wants_contact = any(
-            keyword in user_request.lower()
-            for keyword in ["email", "contact", "phone", "reach", "address", "phone number"]
-        )
+        user_wants_contact = any(keyword in user_request.lower() for keyword in 
+                                 ["email", "contact", "phone", "reach", "address", "phone number"])
         
         best_phone = phone_candidates[0] if phone_candidates else None
         best_email = email_candidates[0] if email_candidates else None
@@ -427,7 +403,9 @@ HTML content:
         for ent in entities:
             phone_val = ent.get("phone")
             # Only use regex fallback if LLM didn't extract phone AND user wants contact info
+            # AND the phone is actually valid (not a date)
             if best_phone and (phone_val in (None, "", "null")) and user_wants_contact:
+                # Double-check it's a valid phone before using
                 if is_valid_phone(best_phone):
                     ent["phone"] = best_phone
 
@@ -448,36 +426,30 @@ HTML content:
 def llm_scrape_from_seeds(
     seeds_path: str = SEEDS_PATH_DEFAULT,
     output_path: str = OUTPUT_PATH_DEFAULT,
-    delay_seconds: float = 0.0,  # set default to 0 now that we parallel-fetch
+    delay_seconds: float = 1.0,
     user_request: str = "Extract a general profile of each entity.",
     custom_parser_instructions: Optional[str] = None,
-    max_workers: int = 10,
 ) -> None:
 
     seeds = load_ndjson(seeds_path)
     print(f"Loaded {len(seeds)} seeds from {seeds_path}")
 
-    # 1) PARALLEL FETCH ALL HTML
-    print(f"Fetching HTML for {len(seeds)} URLs in parallel (max_workers={max_workers})...")
-    seed_html_pairs = fetch_all_html(seeds, max_workers=max_workers)
-
     out_file = Path(output_path)
-    total = len(seed_html_pairs)
     with out_file.open("w", encoding="utf-8") as f_out:
-        for idx, (item, html) in enumerate(seed_html_pairs, start=1):
+        for idx, item in enumerate(seeds):
             url = item.get("url")
             label = item.get("label", "unknown")
             title = item.get("title", "")
-            source_query = item.get("source_query") or item.get("query")
 
-            print(f"\n[{idx}/{total}] Processing {url} (label={label})")
+            print(f"\n[{idx}/{len(seeds)}] Fetching {url} (label={label})")
+            html = fetch_html(url)
 
             if html is None:
                 record = {
                     "url": url,
                     "label": label,
                     "title": title,
-                    "source_query": source_query,
+                    "source_query": item.get("source_query"),
                     "scraped_status": "http_error",
                     "scraped_at": None,
                     "llm_payload": None,
@@ -501,7 +473,7 @@ def llm_scrape_from_seeds(
                     "url": url,
                     "label": label,
                     "title": title,
-                    "source_query": source_query,
+                    "source_query": item.get("source_query"),
                     "scraped_status": "ok",
                     "scraped_at": now_str,
                     "llm_payload": ent,
@@ -518,7 +490,7 @@ if __name__ == "__main__":
         "Describe what kind of information would you like to extract: "
     )
     start =time.time()
-    
+
     llm_scrape_from_seeds(user_request=request_user)
     end = time.time()
     print(f"Completed in {end - start:.2f} seconds.")

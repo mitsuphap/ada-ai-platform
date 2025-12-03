@@ -66,13 +66,6 @@ def normalize_url(url: str) -> str:
     return normalized or url.rstrip("/")
 
 
-DEFAULT_QUERIES = [
-    "literary magazine submissions directory",
-    "poetry press open submissions",
-    "literary agents accepting submissions list",
-    "small press submissions guidelines",
-]
-
 
 def call_google_search_save(
     queries,
