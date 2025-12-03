@@ -41,30 +41,98 @@ export default function Scraper() {
     const specLower = dataSpec.toLowerCase()
     const requestedFields: string[] = []
     
+    // Debug: Log what we're detecting (disabled for production)
+    // console.log('[DEBUG] Detecting fields from prompt:', dataSpec)
+    
     // Field mapping with flexible keyword matching
+    // Note: Order matters - more specific matches should come first
+    // Use word boundaries to avoid false positives (e.g., "iPhone" shouldn't match "phone")
     const fieldMappings: { [key: string]: string[] } = {
+      'opening_hours': ['opening hours', 'opening time', 'business hours', 'operating hours', 'when open', 'schedule', 'hours of operation', 'opening schedule', 'what time', 'what times'],
       'contact_email': ['email', 'contact email', 'e-mail', 'mail', 'contact', 'correspondence'],
-      'phone': ['phone', 'telephone', 'tel', 'call', 'number'],
+      'phone': ['phone number', 'telephone', 'tel', 'call'], // Removed 'phone' alone to avoid matching "iPhone"
       'address': ['address', 'location', 'street', 'postal'],
       'city': ['city', 'town'],
       'country': ['country', 'nation'],
       'website': ['website', 'site', 'url', 'web', 'homepage'],
-      'genres': ['genre', 'category', 'type', 'kind'],
-      'reading_period': ['reading period', 'submission period', 'open', 'deadline', 'window'],
-      'reading_fee': ['fee', 'cost', 'price', 'charge', 'payment'],
+      'description': ['description', 'details', 'info', 'information', 'about', 'specs', 'specifications'],
+      'category': ['category', 'type', 'kind', 'genre'],
+      'storage': ['storage', 'capacity', 'gb', 'tb', 'memory'],
+      'colors': ['color', 'colors', 'colour', 'colours', 'available colors'],
+      'tags': ['tags', 'tag', 'keywords', 'features'],
+      'genres': ['genre', 'genres'],
+      'reading_period': ['reading period', 'submission period', 'deadline', 'window'],
+      'reading_fee': ['reading fee', 'submission fee', 'submission cost'], // Only for literary magazine submission fees
+      'price': ['price', 'prices', 'pricing', 'how much', 'dollar', 'dollars', '$', 'cost of', 'costs of', 'what does it cost'], // Product/service prices - removed standalone 'cost'/'costs' to avoid false matches
+      'price_numeric': ['price', 'prices', 'pricing', 'how much', 'dollar', 'dollars', '$', 'cost of', 'costs of', 'what does it cost'], // Numeric price value
       'submission_methods': ['submission', 'submit', 'guideline', 'how to submit', 'method'],
       'response_time': ['response', 'reply', 'answer time', 'turnaround'],
       'name': ['name', 'title', 'company', 'organization']
     }
     
-    // Check each field mapping
+    // Check each field mapping with word boundary matching for single words
+    // Process multi-word phrases first (more specific) to avoid false matches
     Object.keys(fieldMappings).forEach(field => {
       const keywords = fieldMappings[field]
-      if (keywords.some(keyword => specLower.includes(keyword))) {
+      
+      // First check multi-word phrases (more specific)
+      const multiWordKeywords = keywords.filter(k => k.includes(' '))
+      const singleWordKeywords = keywords.filter(k => !k.includes(' '))
+      
+      let matches = false
+      
+      // Check multi-word phrases first
+      if (multiWordKeywords.length > 0) {
+        matches = multiWordKeywords.some(keyword => specLower.includes(keyword))
+      }
+      
+      // Only check single words if no multi-word match found (to avoid false positives)
+      if (!matches && singleWordKeywords.length > 0) {
+        matches = singleWordKeywords.some(keyword => {
+          // Special handling for symbols like $ - they should match literally, not as regex anchors
+          if (keyword === '$') {
+            // For $ symbol, check if it actually appears in the text (not as regex end anchor)
+            const result = specLower.includes('$')
+            if (result && (field === 'price' || field === 'price_numeric')) {
+              console.log(`[DEBUG] Price keyword "$" matched in: "${specLower}"`)
+            }
+            return result
+          }
+          
+          // For other keywords, escape regex special characters and use word boundaries
+          const escapedKeyword = keyword.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+          const wordBoundaryRegex = new RegExp(`\\b${escapedKeyword}\\b`, 'i')
+          const result = wordBoundaryRegex.test(specLower)
+          if (result && (field === 'price' || field === 'price_numeric')) {
+            console.log(`[DEBUG] Price keyword "${keyword}" matched in: "${specLower}"`)
+          }
+          return result
+        })
+      }
+      
+      // CRITICAL: For price fields, require explicit confirmation even if a keyword matched
+      if (matches && (field === 'price' || field === 'price_numeric')) {
+        // Double-check that price-related keywords are actually present
+        const priceKeywords = ['price', 'prices', 'pricing', 'how much', 'dollar', 'dollars', '$', 'cost of', 'costs of', 'what does it cost']
+        const hasExplicitPriceKeyword = priceKeywords.some(keyword => {
+          if (keyword.includes(' ')) {
+            return specLower.includes(keyword)
+          }
+          const regex = new RegExp(`\\b${keyword}\\b`, 'i')
+          return regex.test(specLower)
+        })
+          if (!hasExplicitPriceKeyword) {
+            // console.log(`[DEBUG] Price field "${field}" matched but no explicit price keyword found, skipping`)
+            matches = false // Prevent adding price field
+          }
+      }
+      
+      if (matches && !requestedFields.includes(field)) {
         requestedFields.push(field)
       }
     })
     
+    // console.log('[DEBUG] Final detected fields:', requestedFields)
     return requestedFields
   }
 
@@ -73,9 +141,55 @@ export default function Scraper() {
     if (!dataSpec || !payload) return []
     
     const requestedFields = detectRequestedFields(dataSpec)
-    const missing: string[] = []
     
-    requestedFields.forEach(field => {
+    // Safety check: if no fields detected, don't show any missing fields
+    if (requestedFields.length === 0) {
+      // console.log('[DEBUG] No fields detected, returning empty missing array')
+      return []
+    }
+    
+    // CRITICAL: Explicitly filter out price fields if they weren't requested
+    const filteredRequestedFields = requestedFields.filter(field => {
+      if ((field === 'price' || field === 'price_numeric')) {
+        // Only include price if explicitly requested
+        const hasPriceKeyword = dataSpec.toLowerCase().match(/\b(price|prices|pricing|how much|dollar|dollars|\$|cost of|costs of|what does it cost)\b/i)
+        if (!hasPriceKeyword) {
+          // console.log('[DEBUG] Filtering out price field - not explicitly requested')
+          return false
+        }
+      }
+      return true
+    })
+    
+    const missing: string[] = []
+    const missingSet = new Set<string>() // Use Set to avoid duplicates
+    
+    // Check if price fields are requested (after filtering)
+    const wantsPrice = filteredRequestedFields.includes('price') || filteredRequestedFields.includes('price_numeric')
+    
+    // ONLY check fields that were actually requested (use filtered list)
+    filteredRequestedFields.forEach(field => {
+      // Special handling for price fields - consider price found if either price or price_numeric exists
+      // IMPORTANT: Only check price if it was explicitly requested
+      if ((field === 'price' || field === 'price_numeric') && wantsPrice) {
+        if (!missingSet.has('Price')) {
+          const hasPrice = (payload.price !== null && payload.price !== undefined && 
+                           (typeof payload.price === 'string' ? payload.price.trim() !== '' : true)) ||
+                          (payload.price_numeric !== null && payload.price_numeric !== undefined && 
+                           payload.price_numeric > 0)
+          if (!hasPrice) {
+            missing.push('Price')
+            missingSet.add('Price')
+          }
+        }
+        return // Skip the normal check for price fields
+      }
+      
+      // Skip price fields entirely if they weren't requested
+      if (field === 'price' || field === 'price_numeric') {
+        return
+      }
+      
       const value = payload[field]
       const isEmpty = value === null || value === undefined || 
                      (Array.isArray(value) && value.length === 0) ||
@@ -86,11 +200,31 @@ export default function Scraper() {
         const label = field.split('_').map(w => 
           w.charAt(0).toUpperCase() + w.slice(1)
         ).join(' ')
-        missing.push(label)
+        
+        // Avoid duplicates
+        if (!missingSet.has(label)) {
+          missing.push(label)
+          missingSet.add(label)
+        }
       }
     })
     
-    return missing
+    // Final safety check: Remove any price-related missing fields if price wasn't requested
+    const finalMissing = missing.filter(label => {
+      const labelLower = label.toLowerCase()
+      // If price wasn't requested, remove any price-related labels
+      if (!wantsPrice && (labelLower.includes('price') || labelLower === 'cost' || labelLower === 'costs')) {
+        // Debug: Log if we're filtering out price
+        // console.log('Filtering out price from missing fields - price was not requested')
+        return false
+      }
+      return true
+    })
+    
+    // Debug: Log detected and missing fields (disabled for production)
+    // console.log('[DEBUG] Requested fields:', requestedFields, 'Missing:', finalMissing, 'Wants price:', wantsPrice, 'Payload keys:', Object.keys(payload))
+    
+    return finalMissing
   }
 
   const handleSearch = async () => {
@@ -440,6 +574,15 @@ export default function Scraper() {
               const entitiesWithData = successfulEntities.filter(item => {
                 // Entity has data only if ALL requested fields are present
                 return requestedFields.every(field => {
+                  // Special handling for price fields - consider price found if either price or price_numeric exists
+                  if (field === 'price' || field === 'price_numeric') {
+                    const hasPrice = (item.llm_payload.price !== null && item.llm_payload.price !== undefined && 
+                                     (typeof item.llm_payload.price === 'string' ? item.llm_payload.price.trim() !== '' : true)) ||
+                                    (item.llm_payload.price_numeric !== null && item.llm_payload.price_numeric !== undefined && 
+                                     item.llm_payload.price_numeric > 0)
+                    return hasPrice
+                  }
+                  
                   const value = item.llm_payload[field]
                   return value !== null && value !== undefined && 
                          !(Array.isArray(value) && value.length === 0) &&
@@ -546,118 +689,216 @@ export default function Scraper() {
                         {item.llm_payload.name || 'Unnamed Entity'}
                       </h3>
                       
+                      {/* Smart field rendering - show only requested fields + essential context */}
                       <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-sm">
-                        {item.llm_payload.website && (
-                          <div>
-                            <span className="font-medium text-[#0F172A]">Website:</span>{' '}
-                            <a 
-                              href={item.llm_payload.website} 
-                              target="_blank" 
-                              rel="noopener noreferrer" 
-                              className="text-[#5E60F8] hover:text-[#D946EF] hover:underline"
-                            >
-                              {item.llm_payload.website}
-                            </a>
-                          </div>
-                        )}
-                        {/* Contact Email - show if requested or if exists */}
-                        {((topic && detectRequestedFields(topic).includes('contact_email')) || 
-                          item.llm_payload.contact_email) && (
-                          <div>
-                            <span className="font-medium text-[#0F172A]">Email:</span>{' '}
-                            {item.llm_payload.contact_email ? (
-                              <a 
-                                href={`mailto:${item.llm_payload.contact_email}`}
-                                className="text-[#5E60F8] hover:text-[#D946EF] hover:underline"
-                              >
-                                {item.llm_payload.contact_email}
-                              </a>
-                            ) : (
-                              <span className="text-amber-600 italic text-xs">Not found on page</span>
-                            )}
-                          </div>
-                        )}
-                        {/* Phone - show if requested or if exists */}
-                        {((topic && detectRequestedFields(topic).includes('phone')) || 
-                          item.llm_payload.phone) && (
-                          <div>
-                            <span className="font-medium text-[#0F172A]">Phone:</span>{' '}
-                            {item.llm_payload.phone ? (
-                              <a 
-                                href={`tel:${item.llm_payload.phone}`}
-                                className="text-[#5E60F8] hover:text-[#D946EF] hover:underline"
-                              >
-                                {item.llm_payload.phone}
-                              </a>
-                            ) : (
-                              <span className="text-amber-600 italic text-xs">Not found on page</span>
-                            )}
-                          </div>
-                        )}
-                        {item.llm_payload.city && (
-                          <div>
-                            <span className="font-medium text-[#0F172A]">City:</span>{' '}
-                            <span className="text-[#64748B]">{item.llm_payload.city}</span>
-                          </div>
-                        )}
-                        {item.llm_payload.country && (
-                          <div>
-                            <span className="font-medium text-[#0F172A]">Country:</span>{' '}
-                            <span className="text-[#64748B]">{item.llm_payload.country}</span>
-                          </div>
-                        )}
-                        {item.llm_payload.genres && item.llm_payload.genres.length > 0 && (
-                          <div>
-                            <span className="font-medium text-[#0F172A]">Genres:</span>{' '}
-                            <span className="text-[#64748B]">
-                              {item.llm_payload.genres.map((g: string, i: number) => (
-                                <span key={i}>
-                                  {g}
-                                  {i < item.llm_payload.genres.length - 1 ? ', ' : ''}
-                                </span>
-                              ))}
-                            </span>
-                          </div>
-                        )}
-                        {item.llm_payload.reading_period && (
-                          <div>
-                            <span className="font-medium text-[#0F172A]">Reading Period:</span>{' '}
-                            <span className="text-[#64748B]">{item.llm_payload.reading_period}</span>
-                          </div>
-                        )}
-                        {item.llm_payload.reading_fee !== undefined && (
-                          <div>
-                            <span className="font-medium text-[#0F172A]">Reading Fee:</span>{' '}
-                            <span className="text-[#64748B]">${item.llm_payload.reading_fee}</span>
-                          </div>
-                        )}
-                        {item.llm_payload.submission_methods && item.llm_payload.submission_methods.length > 0 && (
-                          <div>
-                            <span className="font-medium text-[#0F172A]">Submission Methods:</span>{' '}
-                            <span className="text-[#64748B]">
-                              {item.llm_payload.submission_methods.map((m: string, i: number) => (
-                                <span key={i}>
-                                  {m}
-                                  {i < item.llm_payload.submission_methods.length - 1 ? ', ' : ''}
-                                </span>
-                              ))}
-                            </span>
-                          </div>
-                        )}
-                        {item.llm_payload.response_time && (
-                          <div>
-                            <span className="font-medium text-[#0F172A]">Response Time:</span>{' '}
-                            <span className="text-[#64748B]">{item.llm_payload.response_time}</span>
-                          </div>
-                        )}
+                        {(() => {
+                          // Get what user requested from the topic
+                          const requestedFields = topic ? detectRequestedFields(topic) : []
+                          
+                          // Fields to always exclude (metadata/internal)
+                          const excludeFields = ['name', 'error', 'extra', 'notes']
+                          
+                          // Essential context fields that are always shown (if available)
+                          const essentialContextFields = ['website', 'description', 'category']
+                          
+                          // Smart field relationships - if user asks for X, also show related Y
+                          const fieldRelationships: { [key: string]: string[] } = {
+                            'price': ['storage', 'colors', 'category'], // If asking for price, also show storage/colors (pricing variants)
+                            'price_numeric': ['storage', 'colors', 'category'],
+                            'contact_email': ['phone', 'address'], // If asking for email, also show phone/address
+                            'phone': ['contact_email', 'address'],
+                            'address': ['city', 'country', 'phone', 'contact_email'],
+                            'city': ['country', 'address'],
+                            'country': ['city', 'address']
+                          }
+                          
+                          // Determine which fields to show
+                          let fieldsToShow = new Set<string>()
+                          
+                          if (requestedFields.length > 0) {
+                            // User specified what they want - show only requested + related + minimal context
+                            requestedFields.forEach(field => {
+                              fieldsToShow.add(field)
+                              // Add related fields
+                              if (fieldRelationships[field]) {
+                                fieldRelationships[field].forEach(related => fieldsToShow.add(related))
+                              }
+                            })
+                            // Add minimal essential context (just website for source reference)
+                            fieldsToShow.add('website')
+                          } else {
+                            // No specific fields requested - show essential fields only (smart defaults)
+                            const defaultFields = ['price', 'price_numeric', 'description', 'category', 'website', 'storage', 'colors']
+                            defaultFields.forEach(field => fieldsToShow.add(field))
+                          }
+                          
+                          // Get all fields from payload that should be displayed
+                          const allFields = Object.keys(item.llm_payload)
+                            .filter(key => !excludeFields.includes(key))
+                            .filter(key => {
+                              // Only show if it's in fieldsToShow set
+                              if (fieldsToShow.size > 0 && !fieldsToShow.has(key)) {
+                                return false
+                              }
+                              
+                              const value = item.llm_payload[key]
+                              // Exclude null, undefined, empty strings, empty arrays, and zero price_numeric
+                              if (value === null || value === undefined) return false
+                              if (typeof value === 'string' && value.trim() === '') return false
+                              if (Array.isArray(value) && value.length === 0) return false
+                              if (key === 'price_numeric' && value === 0) return false
+                              return true
+                            })
+                          
+                          // Sort: requested fields first, then essential context, then others
+                          const sortedFields = allFields.sort((a, b) => {
+                            const aRequested = requestedFields.includes(a)
+                            const bRequested = requestedFields.includes(b)
+                            if (aRequested && !bRequested) return -1
+                            if (!aRequested && bRequested) return 1
+                            
+                            const aEssential = essentialContextFields.includes(a)
+                            const bEssential = essentialContextFields.includes(b)
+                            if (aEssential && !bEssential) return -1
+                            if (!aEssential && bEssential) return 1
+                            
+                            return a.localeCompare(b)
+                          })
+                          
+                          return sortedFields
+                            .filter(field => {
+                              // Skip price_numeric if price already exists (to avoid duplicates)
+                              return !(field === 'price_numeric' && item.llm_payload.price)
+                            })
+                            .map((field) => {
+                            const value = item.llm_payload[field]
+                            
+                            // Format field name for display
+                            const fieldLabel = field.split('_').map(w => 
+                              w.charAt(0).toUpperCase() + w.slice(1)
+                            ).join(' ')
+                            
+                            // Special handling for different field types
+                            if (field === 'price' || field === 'price_numeric') {
+                              // Price fields - always show if exists
+                              let priceValue: string | null = null
+                              if (field === 'price') {
+                                priceValue = value as string
+                              } else if (field === 'price_numeric' && typeof value === 'number' && value > 0) {
+                                priceValue = `$${value.toLocaleString()}`
+                              }
+                              
+                              return (
+                                <div key={field}>
+                                  <span className="font-medium text-[#0F172A]">Price:</span>{' '}
+                                  {priceValue ? (
+                                    <span className="text-[#64748B]">{priceValue}</span>
+                                  ) : (
+                                    <span className="text-amber-600 italic text-xs">Not found</span>
+                                  )}
+                                </div>
+                              )
+                            }
+                            
+                            if (field === 'website') {
+                              return (
+                                <div key={field}>
+                                  <span className="font-medium text-[#0F172A]">Website:</span>{' '}
+                                  <a 
+                                    href={value as string} 
+                                    target="_blank"
+                                    rel="noopener noreferrer" 
+                                    className="text-[#5E60F8] hover:text-[#D946EF] hover:underline break-all"
+                                  >
+                                    {value as string}
+                                  </a>
+                                </div>
+                              )
+                            }
+                            
+                            if (field === 'contact_email' || field === 'email') {
+                              return (
+                                <div key={field}>
+                                  <span className="font-medium text-[#0F172A]">Email:</span>{' '}
+                                  <a 
+                                    href={`mailto:${value}`}
+                                    className="text-[#5E60F8] hover:text-[#D946EF] hover:underline"
+                                  >
+                                    {value as string}
+                                  </a>
+                                </div>
+                              )
+                            }
+                            
+                            if (field === 'phone') {
+                              return (
+                                <div key={field}>
+                                  <span className="font-medium text-[#0F172A]">Phone:</span>{' '}
+                                  <a 
+                                    href={`tel:${value}`}
+                                    className="text-[#5E60F8] hover:text-[#D946EF] hover:underline"
+                                  >
+                                    {value as string}
+                                  </a>
+                                </div>
+                              )
+                            }
+                            
+                            if (Array.isArray(value)) {
+                              return (
+                                <div key={field}>
+                                  <span className="font-medium text-[#0F172A]">{fieldLabel}:</span>{' '}
+                                  <span className="text-[#64748B]">
+                                    {value.map((item: any, i: number) => (
+                                      <span key={i}>
+                                        {String(item)}
+                                        {i < value.length - 1 ? ', ' : ''}
+                                      </span>
+                                    ))}
+                                  </span>
+                                </div>
+                              )
+                            }
+                            
+                            // Default: render as text
+                            return (
+                              <div key={field}>
+                                <span className="font-medium text-[#0F172A]">{fieldLabel}:</span>{' '}
+                                <span className="text-[#64748B]">{String(value)}</span>
+                              </div>
+                            )
+                          })
+                        })()}
                       </div>
                       
-                      {item.llm_payload.notes && (
-                        <div className="mt-3 pt-3 border-t border-slate-200">
-                          <span className="font-medium text-[#0F172A]">Notes:</span>{' '}
-                          <span className="text-sm text-[#64748B]">{item.llm_payload.notes}</span>
-                        </div>
-                      )}
+                      {/* Show extra/notes field separately if it exists and is relevant */}
+                      {(() => {
+                        const requestedFields = topic ? detectRequestedFields(topic) : []
+                        const hasExtra = item.llm_payload.extra || item.llm_payload.notes
+                        
+                        // Show extra/notes if:
+                        // 1. No specific fields requested (general query), OR
+                        // 2. Extra info might be relevant to requested fields
+                        const extraText = (item.llm_payload.extra || item.llm_payload.notes || '').toLowerCase()
+                        const shouldShowExtra = hasExtra && (
+                          requestedFields.length === 0 || 
+                          (requestedFields.includes('opening_hours') && (
+                            extraText.includes('hour') || extraText.includes('open') || extraText.includes('close') || extraText.includes('time')
+                          )) ||
+                          (requestedFields.includes('price') || requestedFields.includes('price_numeric')) && (
+                            extraText.includes('price') || extraText.includes('cost')
+                          )
+                        )
+                        
+                        return shouldShowExtra ? (
+                          <div className="mt-3 pt-3 border-t border-slate-200">
+                            <span className="font-medium text-[#0F172A]">Additional Info:</span>{' '}
+                            <span className="text-sm text-[#64748B]">
+                              {item.llm_payload.extra || item.llm_payload.notes}
+                            </span>
+                          </div>
+                        ) : null
+                      })()}
                     </div>
                   ) : (
                     <p className="text-sm text-[#64748B]">No data extracted</p>
