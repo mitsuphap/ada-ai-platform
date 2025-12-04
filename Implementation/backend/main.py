@@ -428,6 +428,8 @@ def search_and_scrape_auto(request: ScrapeRequest):
         # Step 4: Build user_request for scraping (use topic directly, like terminal)
         # Match terminal workflow: pass the full topic as user_request
         user_request = request.topic if request.topic else "Extract a general profile of each entity."
+        print(f"[API] Received topic: {request.topic}")
+        print(f"[API] Using user_request: {user_request}")
         
         # Modify PARSER_INSTRUCTIONS if data_specification provided (but don't duplicate topic)
         custom_instructions = None
@@ -438,6 +440,11 @@ def search_and_scrape_auto(request: ScrapeRequest):
         # Use classified file directly instead of creating chosen_seeds.ndjson
         step_start = time.time()
         output_path = OUTPUT_DIR / "discovered_sites.ndjson"
+        print(f"[API] Output will be written to: {output_path}")
+        # Ensure output file is cleared before scraping (in case of previous runs)
+        if output_path.exists():
+            output_path.unlink()
+            print(f"[API] Cleared existing output file")
         llm_scrape_from_seeds(
             seeds_path=str(classified_results_path),  # Read directly from classified file (like terminal)
             output_path=str(output_path),

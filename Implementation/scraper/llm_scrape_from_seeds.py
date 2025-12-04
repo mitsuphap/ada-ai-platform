@@ -486,6 +486,8 @@ def llm_scrape_from_seeds(
     
     seeds = load_ndjson(seeds_path)
     print(f"Loaded {len(seeds)} seeds from {seeds_path}")
+    print(f"📝 User request: {user_request}")
+    print(f"📁 Output path: {output_path}")
 
     if timer:
         timer.add_metadata("num_seeds", len(seeds))
@@ -530,6 +532,7 @@ def llm_scrape_from_seeds(
             }]
         
         print(f"[LLM] Extracting structured data for {url} ...")
+        print(f"    User request: {user_request[:100]}{'...' if len(user_request) > 100 else ''}")
         entities = call_gemini_extract(
             html,
             url=url,
@@ -583,12 +586,15 @@ def llm_scrape_from_seeds(
         # Still use parallel processing even without timer
         run_parallel_processing()
     
-    # Write all records if using timer
+    # Write all records (always write, regardless of timer)
+    with out_file.open("w", encoding="utf-8") as f_out:
+        for record in all_records:
+            f_out.write(json.dumps(record, ensure_ascii=False) + "\n")
+    
     if timer:
-        with out_file.open("w", encoding="utf-8") as f_out:
-            for record in all_records:
-                f_out.write(json.dumps(record, ensure_ascii=False) + "\n")
         timer.add_metadata("records_saved", len(all_records))
+    
+    print(f"✅ Saved {len(all_records)} records to {output_path}")
 
 
 if __name__ == "__main__":
