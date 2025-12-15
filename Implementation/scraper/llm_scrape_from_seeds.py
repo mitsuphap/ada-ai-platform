@@ -74,26 +74,46 @@ EMAIL_REGEX = re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}")
 
 def is_valid_phone(phone_str: str) -> bool:
     """Validate that a phone number string is actually a phone number, not a date or other number."""
+    if not phone_str or not isinstance(phone_str, str):
+        return False
+    
     digits = re.sub(r"\D", "", phone_str)
-    # Must have 7-15 digits
+    # Must have 7-15 digits (international standard)
     if not (7 <= len(digits) <= 15):
         return False
+    
     # Reject if it looks like a year range (e.g., "2012-2014")
     if re.search(r"\d{4}[\s\-]+\d{4}", phone_str):
         return False
+    
     # Reject if it's just 4 digits (likely a year)
     if len(digits) == 4 and re.match(r"^\d{4}$", phone_str.strip()):
         return False
+    
     # Reject if it contains common date patterns
     if re.search(r"(19|20)\d{2}", phone_str) and len(digits) <= 8:
         return False
+    
+    # Reject numbers that are suspiciously long (likely concatenated or false positives)
+    # Most valid phone numbers are 10-12 digits (with country code)
+    if len(digits) > 12:
+        # Only allow 13-15 digits if they have proper international formatting
+        if not re.search(r"^\+?\d{1,3}[\s\-]", phone_str.strip()):
+            return False
+    
+    # Reject numbers that start with 0 followed by many digits (often false positives)
+    if phone_str.strip().startswith("0") and len(digits) > 11:
+        return False
+    
     # Must contain at least one space, dash, or parenthesis (typical phone formatting)
-    # OR be a long international number
+    # OR be a properly formatted international number
     if len(digits) >= 10:
         if not re.search(r"[\s\-\(\)]", phone_str):
-            # Long number without formatting might be valid international
-            return True
+            # Long number without formatting might be valid international, but check format
+            if not phone_str.strip().startswith("+"):
+                return False
         return True
+    
     # For shorter numbers, require some formatting
     return bool(re.search(r"[\s\-\(\)]", phone_str))
 
@@ -443,6 +463,40 @@ HTML content:
         else:
             raise ValueError("LLM returned invalid JSON type")
 
+        # Normalize Education vertical's nested structure: {"contacts": [...]} -> flat entities
+        normalized_entities = []
+        for ent in entities:
+            # Check if this is Education vertical format with nested contacts array
+            if isinstance(ent, dict) and "contacts" in ent and isinstance(ent.get("contacts"), list):
+                # Flatten: each contact becomes a separate entity
+                for contact in ent.get("contacts", []):
+                    if isinstance(contact, dict):
+                        flat_ent = {
+                            "name": contact.get("name", ""),
+                            "title": contact.get("title", ""),
+                            "contact_email": contact.get("email", ""),
+                            "phone": contact.get("phone", ""),
+                            "description": contact.get("description", ""),
+                            "website": contact.get("source_url", ""),
+                        }
+                        # Copy over any other top-level fields
+                        for key, value in ent.items():
+                            if key != "contacts" and key not in flat_ent:
+                                flat_ent[key] = value
+                        normalized_entities.append(flat_ent)
+                # If no contacts found, keep the original entity
+                if not ent.get("contacts"):
+                    normalized_entities.append(ent)
+            else:
+                # Regular format, keep as-is but ensure contact_email/phone fields exist
+                normalized_ent = dict(ent)
+                # Normalize email field name
+                if "email" in normalized_ent and "contact_email" not in normalized_ent:
+                    normalized_ent["contact_email"] = normalized_ent.pop("email")
+                normalized_entities.append(normalized_ent)
+
+        entities = normalized_entities
+
         # Fallback: if phone/email missing but regex found candidates, fill them
         # But only if user request specifically asks for contact info
         user_wants_contact = any(
@@ -456,12 +510,14 @@ HTML content:
         for ent in entities:
             phone_val = ent.get("phone")
             # Only use regex fallback if LLM didn't extract phone AND user wants contact info
+            # AND phone is actually missing (not empty string from nested structure)
             if best_phone and (phone_val in (None, "", "null")) and user_wants_contact:
                 if is_valid_phone(best_phone):
                     ent["phone"] = best_phone
 
             email_val = ent.get("contact_email") or ent.get("email")
             # Only use regex fallback if LLM didn't extract email AND user wants contact info
+            # AND email is actually missing (not empty string from nested structure)
             if best_email and (email_val in (None, "", "null")) and user_wants_contact:
                 ent["contact_email"] = best_email
 
