@@ -1,0 +1,26 @@
+[
+  {
+    "key": "asu",
+    "name": "Arizona State University",
+    "domains": ["asu.edu"],
+    "city": "Tempe",
+    "state": "AZ",
+    "aliases": ["ASU"]
+  },
+  {
+    "key": "okstate",
+    "name": "Oklahoma State University",
+    "domains": ["okstate.edu"],
+    "city": "Stillwater",
+    "state": "OK",
+    "aliases": ["OSU"]
+  },
+  {
+    "key": "sc",
+    "name": "University of South Carolina",
+    "domains": ["sc.edu"],
+    "city": "Columbia",
+    "state": "SC",
+    "aliases": ["USC", "UofSC"]
+  }
+]

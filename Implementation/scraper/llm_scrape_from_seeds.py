@@ -20,6 +20,9 @@ from bs4 import BeautifulSoup
 import requests
 import google.generativeai as genai
 
+# NEW: vertical registry (folder "verticals" sits next to this file)
+from verticals import get_vertical_for_request
+
 SEEDS_PATH_DEFAULT = "search_results_classified.ndjson"
 OUTPUT_PATH_DEFAULT = "discovered_sites.ndjson"
 
@@ -56,9 +59,8 @@ PHONE_REGEX = re.compile(
     re.VERBOSE,
 )
 
-EMAIL_REGEX = re.compile(
-    r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}"
-)
+EMAIL_REGEX = re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}")
+
 
 def is_valid_phone(phone_str: str) -> bool:
     """Validate that a phone number string is actually a phone number, not a date or other number."""
@@ -67,23 +69,24 @@ def is_valid_phone(phone_str: str) -> bool:
     if not (7 <= len(digits) <= 15):
         return False
     # Reject if it looks like a year range (e.g., "2012-2014")
-    if re.search(r'\d{4}[\s\-]+\d{4}', phone_str):
+    if re.search(r"\d{4}[\s\-]+\d{4}", phone_str):
         return False
     # Reject if it's just 4 digits (likely a year)
-    if len(digits) == 4 and re.match(r'^\d{4}$', phone_str.strip()):
+    if len(digits) == 4 and re.match(r"^\d{4}$", phone_str.strip()):
         return False
     # Reject if it contains common date patterns
-    if re.search(r'(19|20)\d{2}', phone_str) and len(digits) <= 8:
+    if re.search(r"(19|20)\d{2}", phone_str) and len(digits) <= 8:
         return False
     # Must contain at least one space, dash, or parenthesis (typical phone formatting)
     # OR be a long international number
     if len(digits) >= 10:
-        if not re.search(r'[\s\-\(\)]', phone_str):
+        if not re.search(r"[\s\-\(\)]", phone_str):
             # Long number without formatting might be valid international
             return True
         return True
     # For shorter numbers, require some formatting
-    return bool(re.search(r'[\s\-\(\)]', phone_str))
+    return bool(re.search(r"[\s\-\(\)]", phone_str))
+
 
 def extract_phone_candidates(text: str) -> List[str]:
     """Extract phone numbers from text, filtering out false positives like dates."""
@@ -94,13 +97,14 @@ def extract_phone_candidates(text: str) -> List[str]:
             cleaned.append(m)
     return cleaned
 
+
 def extract_email_candidates(text: str) -> List[str]:
     return list({m.group(0).strip() for m in EMAIL_REGEX.finditer(text)})
 
 
 # --- LLM INSTRUCTIONS -----------------------------------------
 
-PARSER_INSTRUCTIONS =  """
+PARSER_INSTRUCTIONS = """
 You are a data extractor for a general-purpose information platform.
 
 You will receive:
@@ -247,7 +251,7 @@ Do NOT hallucinate data that is not present.
 REMEMBER:
 - Output ONLY valid JSON.
 - No comments, no markdown, no backticks, no explanations.
-"""
+""".strip()
 
 
 # --- UTILITIES ------------------------------------------------
@@ -311,24 +315,24 @@ def prepare_html_for_llm(raw_html: str) -> str:
     )
 
     main_text = main.get_text("\n", strip=True) if main else ""
-    
+
     # Also extract footer and contact sections (where emails often are)
     footer = soup.select_one("footer")
     footer_text = footer.get_text("\n", strip=True) if footer else ""
-    
+
     # Look for contact-related sections
     contact_sections = soup.select(
         "div.contact, section.contact, div#contact, section#contact, .contact-info, .contact-details"
     )
     contact_text = "\n".join([s.get_text("\n", strip=True) for s in contact_sections])
-    
+
     # Combine all text
     text = main_text
     if footer_text:
         text += "\n\n--- FOOTER ---\n" + footer_text
     if contact_text:
         text += "\n\n--- CONTACT SECTIONS ---\n" + contact_text
-    
+
     # If still no text, fall back to full page
     if not text.strip():
         text = soup.get_text("\n", strip=True)
@@ -336,7 +340,7 @@ def prepare_html_for_llm(raw_html: str) -> str:
     # If it's huge, keep both the beginning and the end (footer)
     if len(text) > MAX_HTML_CHARS:
         front = text[:20000]
-        back = text[-10000:]   # last 10k chars – where footer often lives
+        back = text[-10000:]  # last 10k chars – where footer often lives
         text = front + "\n...\n" + back
 
     return text
@@ -347,7 +351,7 @@ def strip_code_fence(text: str) -> str:
     if t.startswith("```"):
         first_newline = t.find("\n")
         if first_newline != -1:
-            t = t[first_newline + 1 :]
+            t = t[first_newline + 1:]
         if t.strip().endswith("```"):
             t = t[: t.rfind("```")]
     return t.strip()
@@ -420,7 +424,7 @@ HTML content:
             keyword in user_request.lower()
             for keyword in ["email", "contact", "phone", "reach", "address", "phone number"]
         )
-        
+
         best_phone = phone_candidates[0] if phone_candidates else None
         best_email = email_candidates[0] if email_candidates else None
 
@@ -448,14 +452,47 @@ HTML content:
 def llm_scrape_from_seeds(
     seeds_path: str = SEEDS_PATH_DEFAULT,
     output_path: str = OUTPUT_PATH_DEFAULT,
-    delay_seconds: float = 0.0,  # set default to 0 now that we parallel-fetch
+    delay_seconds: float = 0.0,  # default 0 because we parallel-fetch
     user_request: str = "Extract a general profile of each entity.",
     custom_parser_instructions: Optional[str] = None,
     max_workers: int = 10,
 ) -> None:
 
+    # NEW: detect vertical once per run (based on the user_request)
+    vertical, det = get_vertical_for_request(user_request)
+    if vertical:
+        print(f"[vertical] {vertical.name} conf={det.confidence:.2f} reason={det.reason}")
+    else:
+        print("[vertical] none")
+
+    # NEW: if no custom instructions provided, use vertical instructions (if any)
+    if custom_parser_instructions is None and vertical:
+        custom_parser_instructions = vertical.get_extraction_instructions(user_request)
+
     seeds = load_ndjson(seeds_path)
     print(f"Loaded {len(seeds)} seeds from {seeds_path}")
+
+    # NEW: optional strict filtering BEFORE fetch (saves network + LLM calls)
+    if vertical:
+        kept = []
+        blocked = 0
+        for s in seeds:
+            cand = {
+                "url": s.get("url"),
+                "title": s.get("title", ""),
+                "snippet": s.get("snippet", "") or s.get("summary", ""),
+            }
+            vr = vertical.validate_result(user_request, cand)
+            if vr.allow:
+                s["_vertical_score_delta"] = vr.score_delta
+                s["_vertical_reason"] = vr.reason
+                kept.append(s)
+            else:
+                blocked += 1
+
+        print(f"[vertical] kept {len(kept)}/{len(seeds)} seeds, blocked {blocked}")
+        kept.sort(key=lambda x: x.get("_vertical_score_delta", 0.0), reverse=True)
+        seeds = kept
 
     # 1) PARALLEL FETCH ALL HTML
     print(f"Fetching HTML for {len(seeds)} URLs in parallel (max_workers={max_workers})...")
@@ -481,6 +518,8 @@ def llm_scrape_from_seeds(
                     "scraped_status": "http_error",
                     "scraped_at": None,
                     "llm_payload": None,
+                    "vertical": vertical.name if vertical else None,
+                    "vertical_reason": item.get("_vertical_reason"),
                 }
                 f_out.write(json.dumps(record, ensure_ascii=False) + "\n")
                 continue
@@ -505,6 +544,9 @@ def llm_scrape_from_seeds(
                     "scraped_status": "ok",
                     "scraped_at": now_str,
                     "llm_payload": ent,
+                    "vertical": vertical.name if vertical else None,
+                    "vertical_reason": item.get("_vertical_reason"),
+                    "vertical_score_delta": item.get("_vertical_score_delta"),
                 }
                 f_out.write(json.dumps(record, ensure_ascii=False) + "\n")
 
@@ -513,12 +555,21 @@ def llm_scrape_from_seeds(
 
 
 if __name__ == "__main__":
-    import time
-    request_user = input(
-        "Describe what kind of information would you like to extract: "
-    )
-    start =time.time()
-    
+    print("[DEBUG] __main__ started")
+
+    import json
+    try:
+        request_user = json.load(open("run_context.json", "r", encoding="utf-8")).get("user_request", "")
+        print("[DEBUG] run_context user_request loaded:", bool(request_user))
+    except Exception as e:
+        print("[DEBUG] run_context load failed:", e)
+        request_user = ""
+
+    if not request_user:
+        request_user = input("Describe what kind of information would you like to extract: ").strip()
+
+    print("[DEBUG] calling llm_scrape_from_seeds now...")
     llm_scrape_from_seeds(user_request=request_user)
-    end = time.time()
-    print(f"Completed in {end - start:.2f} seconds.")
+    print("[DEBUG] finished llm_scrape_from_seeds")
+
+

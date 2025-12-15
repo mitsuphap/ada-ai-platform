@@ -7,6 +7,8 @@
 *.env
 */.env
 Implementation/backend/.env
+myvenv2/Implementation/backend/.env.local
+Implementation/backend/.env.*.local
 # Allow .env.example files (templates)
 !.env.example
 

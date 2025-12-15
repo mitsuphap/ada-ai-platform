@@ -4,8 +4,19 @@ import json
 from datetime import datetime, timezone
 from urllib.parse import urlparse, urlunparse
 
+from dotenv import load_dotenv
+load_dotenv()
+
 API_KEY = os.getenv("GOOGLE_CSE_API_KEY")
 CX = os.getenv("GOOGLE_CSE_CX")
+
+print("[CSE DEBUG] API_KEY set:", bool(API_KEY))
+print("[CSE DEBUG] CX set:", bool(CX))
+print("[CSE DEBUG] CX:", CX)
+print("[CSE DEBUG] KEY prefix:", (API_KEY or "")[:6])
+
+if not API_KEY or not CX:
+    raise RuntimeError("Missing GOOGLE_CSE_API_KEY or GOOGLE_CSE_CX (check .env / terminal env).")
 
 CSE_URL = "https://www.googleapis.com/customsearch/v1"
 
@@ -84,7 +95,9 @@ def call_google_search_save(
                 "num": results_per_query,
             }
             r = requests.get(CSE_URL, params=params, timeout=20)
-            r.raise_for_status()
+            if r.status_code != 200:
+                print("[CSE ERROR]", r.status_code, r.text[:500])
+                r.raise_for_status()
             data = r.json()
 
             items = data.get("items", [])
