@@ -1,5 +1,6 @@
 import os
 import json
+import time
 from pathlib import Path
 from typing import Optional, Any
 from dotenv import load_dotenv
@@ -235,7 +236,7 @@ Here are the items (with title, url, snippet, query, rank):
     return results
 
 
-def classify_with_llm(raw_path, output_path, batch_size=10):
+def classify_with_llm(raw_path, output_path, user_request: str, batch_size=10, max_workers=10, timer=None):
     rows = load_ndjson(raw_path)
     print(f"Loaded {len(rows)} raw results")
 
@@ -285,6 +286,8 @@ def classify_with_llm(raw_path, output_path, batch_size=10):
                 minimal_batch,
                 domain_description=DOMAIN_DESCRIPTION,
                 labels=LABELS,
+                user_request=user_request,
+                vertical=vertical,
             )
             lookup = {item["url"]: item for item in labels}
 
@@ -316,8 +319,8 @@ def classify_with_llm(raw_path, output_path, batch_size=10):
 
 
 if __name__ == "__main__":
-    raw_file = "search_results_raw.ndjson"
-    out_file = "search_results_classified.ndjson"
+    raw_file = "output/search_results_raw.ndjson"
+    out_file = "output/search_results_classified.ndjson"
 
     import json
     try:
@@ -325,15 +328,28 @@ if __name__ == "__main__":
     except:
         request_user = ""
     if not request_user:
-          request_user = input("Enter the SAME user request you searched with: ").strip()
+        request_user = input("Enter the SAME user request you searched with: ").strip()
 
-
-    start = time.time()
-    classify_with_llm(
-        raw_path=raw_file,
-        output_path=out_file,
-        batch_size=30,
-        user_request=request_user,
-    )
-    end = time.time()
-    print(f"Completed in {end - start:.2f} seconds.")
+    # Use timer if available
+    if PerformanceTimer:
+        timer = PerformanceTimer("classification")
+        timer.start()
+        classify_with_llm(
+            raw_path=raw_file,
+            output_path=out_file,
+            batch_size=30,
+            user_request=request_user,
+            timer=timer,
+        )
+        timer.end()
+        timer.print_summary()
+    else:
+        start = time.time()
+        classify_with_llm(
+            raw_path=raw_file,
+            output_path=out_file,
+            batch_size=30,
+            user_request=request_user,
+        )
+        end = time.time()
+        print(f"Completed in {end - start:.2f} seconds.")

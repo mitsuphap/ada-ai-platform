@@ -20,13 +20,9 @@ from bs4 import BeautifulSoup
 import requests
 import google.generativeai as genai
 
-<<<<<<< HEAD
 # NEW: vertical registry (folder "verticals" sits next to this file)
 from verticals import get_vertical_for_request
 
-SEEDS_PATH_DEFAULT = "search_results_classified.ndjson"
-OUTPUT_PATH_DEFAULT = "discovered_sites.ndjson"
-=======
 # Import timing utilities (optional, will work without it)
 try:
     from benchmark.benchmark_utils import PerformanceTimer
@@ -39,7 +35,6 @@ except ImportError:
 
 SEEDS_PATH_DEFAULT = "output/search_results_classified.ndjson"
 OUTPUT_PATH_DEFAULT = "output/discovered_sites.ndjson"
->>>>>>> 6e74a6da7bfe10f09283b0356bfb03647321f5fd
 
 # --- API KEYS -------------------------------------------------
 # Use a dedicated GEMINI_API_KEY here (NOT the CSE key)
@@ -490,7 +485,6 @@ def llm_scrape_from_seeds(
     timer: Optional[Any] = None,  # PerformanceTimer if available
 ) -> None:
 
-<<<<<<< HEAD
     # NEW: detect vertical once per run (based on the user_request)
     vertical, det = get_vertical_for_request(user_request)
     if vertical:
@@ -502,11 +496,9 @@ def llm_scrape_from_seeds(
     if custom_parser_instructions is None and vertical:
         custom_parser_instructions = vertical.get_extraction_instructions(user_request)
 
-=======
     # Ensure output directory exists
     Path(output_path).parent.mkdir(parents=True, exist_ok=True)
     
->>>>>>> 6e74a6da7bfe10f09283b0356bfb03647321f5fd
     seeds = load_ndjson(seeds_path)
     print(f"Loaded {len(seeds)} seeds from {seeds_path}")
     print(f"📝 User request: {user_request}")
@@ -574,6 +566,8 @@ def llm_scrape_from_seeds(
                 "scraped_status": "http_error",
                 "scraped_at": None,
                 "llm_payload": None,
+                "vertical": vertical.name if vertical else None,
+                "vertical_reason": item.get("_vertical_reason"),
             }]
         
         print(f"[LLM] Extracting structured data for {url} ...")
@@ -598,6 +592,9 @@ def llm_scrape_from_seeds(
                 "scraped_status": "ok",
                 "scraped_at": now_str,
                 "llm_payload": ent,
+                "vertical": vertical.name if vertical else None,
+                "vertical_reason": item.get("_vertical_reason"),
+                "vertical_score_delta": item.get("_vertical_score_delta"),
             })
         return records
     
@@ -633,63 +630,16 @@ def llm_scrape_from_seeds(
     
     # Write all records (always write, regardless of timer)
     with out_file.open("w", encoding="utf-8") as f_out:
-<<<<<<< HEAD
-        for idx, (item, html) in enumerate(seed_html_pairs, start=1):
-            url = item.get("url")
-            label = item.get("label", "unknown")
-            title = item.get("title", "")
-            source_query = item.get("source_query") or item.get("query")
-
-            print(f"\n[{idx}/{total}] Processing {url} (label={label})")
-
-            if html is None:
-                record = {
-                    "url": url,
-                    "label": label,
-                    "title": title,
-                    "source_query": source_query,
-                    "scraped_status": "http_error",
-                    "scraped_at": None,
-                    "llm_payload": None,
-                    "vertical": vertical.name if vertical else None,
-                    "vertical_reason": item.get("_vertical_reason"),
-                }
-                f_out.write(json.dumps(record, ensure_ascii=False) + "\n")
-                continue
-
-            print(f"[LLM] Extracting structured data for {url} ...")
-            entities = call_gemini_extract(
-                html,
-                url=url,
-                label=label,
-                title=title,
-                user_request=user_request,
-                custom_parser_instructions=custom_parser_instructions,
-            )
-
-            now_str = time.strftime("%Y-%m-%dT%H:%M:%S%z")
-            for ent in entities:
-                record = {
-                    "url": url,
-                    "label": label,
-                    "title": title,
-                    "source_query": source_query,
-                    "scraped_status": "ok",
-                    "scraped_at": now_str,
-                    "llm_payload": ent,
-                    "vertical": vertical.name if vertical else None,
-                    "vertical_reason": item.get("_vertical_reason"),
-                    "vertical_score_delta": item.get("_vertical_score_delta"),
-                }
-                f_out.write(json.dumps(record, ensure_ascii=False) + "\n")
-
-            if delay_seconds > 0:
-                time.sleep(delay_seconds)
+        for record in all_records:
+            f_out.write(json.dumps(record, ensure_ascii=False) + "\n")
+    
+    if timer:
+        timer.add_metadata("records_saved", len(all_records))
+    
+    print(f"✅ Saved {len(all_records)} records to {output_path}")
 
 
 if __name__ == "__main__":
-    print("[DEBUG] __main__ started")
-
     import json
     try:
         request_user = json.load(open("run_context.json", "r", encoding="utf-8")).get("user_request", "")
@@ -702,25 +652,6 @@ if __name__ == "__main__":
         request_user = input("Describe what kind of information would you like to extract: ").strip()
 
     print("[DEBUG] calling llm_scrape_from_seeds now...")
-    llm_scrape_from_seeds(user_request=request_user)
-    print("[DEBUG] finished llm_scrape_from_seeds")
-
-
-=======
-        for record in all_records:
-            f_out.write(json.dumps(record, ensure_ascii=False) + "\n")
-    
-    if timer:
-        timer.add_metadata("records_saved", len(all_records))
-    
-    print(f"✅ Saved {len(all_records)} records to {output_path}")
-
-
-if __name__ == "__main__":
-    import time
-    request_user = input(
-        "Describe what kind of information would you like to extract: "
-    )
     
     # Use timer if available
     if PerformanceTimer:
@@ -734,4 +665,5 @@ if __name__ == "__main__":
         llm_scrape_from_seeds(user_request=request_user)
         end = time.time()
         print(f"Completed in {end - start:.2f} seconds.")
->>>>>>> 6e74a6da7bfe10f09283b0356bfb03647321f5fd
+    
+    print("[DEBUG] finished llm_scrape_from_seeds")

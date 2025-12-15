@@ -1,4 +1,5 @@
 import sys
+from pathlib import Path
 
 from query_generator import generate_queries_with_gemini
 from Google_search import call_google_search_save
@@ -22,8 +23,6 @@ def main():
     with open("run_context.json", "w", encoding="utf-8") as f:
         json.dump({"user_request": user_text}, f, ensure_ascii=False)
 
-
-
     # NEW: detect vertical
     vertical, det = get_vertical_for_request(user_text)
     if vertical:
@@ -38,7 +37,6 @@ def main():
     for q in base_queries:
         print(" -", q)
 
-<<<<<<< HEAD
     # NEW: apply vertical enhancements (domain anchoring / exact name)
     if vertical:
         queries = vertical.enhance_search_queries(user_text, base_queries)
@@ -47,16 +45,10 @@ def main():
             print(" -", q)
     else:
         queries = base_queries
-=======
-    #ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%MZ")
-    output_path = f"output/search_results_raw.ndjson"
-    
-    # Ensure output directory exists
-    from pathlib import Path
-    Path("output").mkdir(exist_ok=True)
->>>>>>> 6e74a6da7bfe10f09283b0356bfb03647321f5fd
 
-    output_path = "search_results_raw.ndjson"
+    # Ensure output directory exists
+    output_path = "output/search_results_raw.ndjson"
+    Path("output").mkdir(exist_ok=True)
 
     print(f"\nRunning Google CSE search, saving to {output_path} ...")
     call_google_search_save(queries, output_path=output_path)
