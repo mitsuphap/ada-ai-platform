@@ -13,6 +13,7 @@ import json
 import time
 from pathlib import Path
 from typing import Dict, Any, List, Optional
+from urllib.parse import urlparse
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -469,10 +470,17 @@ HTML content:
             # Check if this is Education vertical format with nested contacts array
             if isinstance(ent, dict) and "contacts" in ent and isinstance(ent.get("contacts"), list):
                 # Flatten: each contact becomes a separate entity
+                contacts_found = False
                 for contact in ent.get("contacts", []):
                     if isinstance(contact, dict):
+                        # Skip contacts without names (they're not useful)
+                        contact_name = contact.get("name", "").strip()
+                        if not contact_name:
+                            continue  # Skip unnamed contacts
+                        
+                        contacts_found = True
                         flat_ent = {
-                            "name": contact.get("name", ""),
+                            "name": contact_name,
                             "title": contact.get("title", ""),
                             "contact_email": contact.get("email", ""),
                             "phone": contact.get("phone", ""),
@@ -484,15 +492,39 @@ HTML content:
                             if key != "contacts" and key not in flat_ent:
                                 flat_ent[key] = value
                         normalized_entities.append(flat_ent)
-                # If no contacts found, keep the original entity
-                if not ent.get("contacts"):
-                    normalized_entities.append(ent)
+                
+                # If no contacts found, create a fallback entity with name from institution_name
+                if not contacts_found:
+                    fallback_ent = dict(ent)
+                    # Use institution_name as fallback name if available
+                    if "institution_name" in fallback_ent and not fallback_ent.get("name"):
+                        fallback_ent["name"] = fallback_ent["institution_name"]
+                    # Or use a generic name based on the page
+                    elif not fallback_ent.get("name"):
+                        fallback_ent["name"] = "Institution Page"
+                    normalized_entities.append(fallback_ent)
             else:
                 # Regular format, keep as-is but ensure contact_email/phone fields exist
                 normalized_ent = dict(ent)
                 # Normalize email field name
                 if "email" in normalized_ent and "contact_email" not in normalized_ent:
                     normalized_ent["contact_email"] = normalized_ent.pop("email")
+                # Ensure name field exists (use title or other fields as fallback)
+                if not normalized_ent.get("name") or normalized_ent.get("name", "").strip() == "":
+                    # Try to find a fallback name from other fields
+                    if normalized_ent.get("title"):
+                        normalized_ent["name"] = normalized_ent["title"]
+                    elif normalized_ent.get("institution_name"):
+                        normalized_ent["name"] = normalized_ent["institution_name"]
+                    elif normalized_ent.get("website"):
+                        # Extract domain name as fallback
+                        try:
+                            domain = urlparse(normalized_ent["website"]).netloc
+                            normalized_ent["name"] = domain.replace("www.", "") if domain else "Entity"
+                        except:
+                            normalized_ent["name"] = "Entity"
+                    else:
+                        normalized_ent["name"] = "Entity"
                 normalized_entities.append(normalized_ent)
 
         entities = normalized_entities
