@@ -323,10 +323,19 @@ if __name__ == "__main__":
     out_file = "output/search_results_classified.ndjson"
 
     import json
-    try:
-        request_user = json.load(open("run_context.json", "r", encoding="utf-8")).get("user_request", "")
-    except:
-        request_user = ""
+    # Read from output/ directory (consistent location)
+    run_context_path = Path("output/run_context.json")
+    # Fallback to /data for Docker compatibility (same file, different path)
+    if not run_context_path.exists():
+        run_context_path = Path("/data/run_context.json")
+    request_user = ""
+    if run_context_path.exists():
+        try:
+            request_user = json.load(open(run_context_path, "r", encoding="utf-8")).get("user_request", "")
+            if request_user:
+                print(f"[DEBUG] Loaded run_context.json from {run_context_path}")
+        except:
+            pass
     if not request_user:
         request_user = input("Enter the SAME user request you searched with: ").strip()
 

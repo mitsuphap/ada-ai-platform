@@ -152,13 +152,35 @@ def generate_and_search(request: SearchRequest, http_request: Request):
     try:
         from query_generator import generate_queries_with_gemini
         from Google_search import call_google_search_save
+        from verticals import get_vertical_for_request
         
         # Generate queries - incorporate data_specification if provided
         if request.data_specification:
             topic_with_spec = f"{request.topic}. Focus on finding: {request.data_specification}"
         else:
             topic_with_spec = request.topic
-        queries = generate_queries_with_gemini(topic_with_spec, n=5)
+        
+        # Save user_request to run_context.json in output/ directory (consistent location)
+        run_context_path = OUTPUT_DIR / "run_context.json"  # Docker: /data/run_context.json, Local: scraper/output/run_context.json
+        run_context_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(run_context_path, "w", encoding="utf-8") as f:
+            json.dump({"user_request": topic_with_spec}, f, ensure_ascii=False)
+        
+        # NEW: detect vertical and enhance queries (like discovery_search.py)
+        vertical, det = get_vertical_for_request(topic_with_spec)
+        if vertical:
+            print(f"[vertical] {vertical.name} conf={det.confidence:.2f} reason={det.reason}")
+        else:
+            print("[vertical] none")
+        
+        base_queries = generate_queries_with_gemini(topic_with_spec, n=5)
+        
+        # Apply vertical enhancements (domain anchoring / exact name)
+        if vertical:
+            queries = vertical.enhance_search_queries(topic_with_spec, base_queries)
+            print(f"[API] Vertical-enhanced queries: {len(queries)} queries")
+        else:
+            queries = base_queries
         
         # Save to search_results_raw.ndjson in output directory (matches script workflow)
         output_path = OUTPUT_DIR / "search_results_raw.ndjson"
@@ -371,6 +393,7 @@ def search_and_scrape_auto(request: ScrapeRequest):
         from Google_search import call_google_search_save
         from classify_search_results import classify_with_llm
         from llm_scrape_from_seeds import llm_scrape_from_seeds, PARSER_INSTRUCTIONS
+        from verticals import get_vertical_for_request
         
         # Step 1: Generate queries and search
         step_start = time.time()
@@ -379,7 +402,28 @@ def search_and_scrape_auto(request: ScrapeRequest):
         else:
             topic_with_spec = request.topic
         
-        queries = generate_queries_with_gemini(topic_with_spec, n=5)
+        # Save user_request to run_context.json in output/ directory (consistent location)
+        run_context_path = OUTPUT_DIR / "run_context.json"  # Docker: /data/run_context.json, Local: scraper/output/run_context.json
+        run_context_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(run_context_path, "w", encoding="utf-8") as f:
+            json.dump({"user_request": topic_with_spec}, f, ensure_ascii=False)
+        
+        # NEW: detect vertical and enhance queries (like discovery_search.py)
+        vertical, det = get_vertical_for_request(topic_with_spec)
+        if vertical:
+            print(f"[vertical] {vertical.name} conf={det.confidence:.2f} reason={det.reason}")
+        else:
+            print("[vertical] none")
+        
+        base_queries = generate_queries_with_gemini(topic_with_spec, n=5)
+        
+        # Apply vertical enhancements (domain anchoring / exact name)
+        if vertical:
+            queries = vertical.enhance_search_queries(topic_with_spec, base_queries)
+            print(f"[API] Vertical-enhanced queries: {len(queries)} queries")
+        else:
+            queries = base_queries
+        
         raw_results_path = OUTPUT_DIR / "search_results_raw.ndjson"
         call_google_search_save(queries, output_path=str(raw_results_path), results_per_query=10)
         stage_times["query_generation_and_search"] = time.time() - step_start
@@ -388,9 +432,12 @@ def search_and_scrape_auto(request: ScrapeRequest):
         # Step 2: Classify search results (already filters by confidence >= 0.95)
         step_start = time.time()
         classified_results_path = OUTPUT_DIR / "search_results_classified.ndjson"
+        # Build user_request for classification (use topic_with_spec)
+        user_request_for_classify = topic_with_spec
         classify_with_llm(
             raw_path=str(raw_results_path),
             output_path=str(classified_results_path),
+            user_request=user_request_for_classify,
             batch_size=20,  # Larger batches = fewer API calls
             max_workers=5  # More parallel workers for classification
         )

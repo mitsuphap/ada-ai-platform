@@ -641,12 +641,20 @@ def llm_scrape_from_seeds(
 
 if __name__ == "__main__":
     import json
-    try:
-        request_user = json.load(open("run_context.json", "r", encoding="utf-8")).get("user_request", "")
-        print("[DEBUG] run_context user_request loaded:", bool(request_user))
-    except Exception as e:
-        print("[DEBUG] run_context load failed:", e)
-        request_user = ""
+    # Read from output/ directory (consistent location)
+    run_context_path = Path("output/run_context.json")
+    # Fallback to /data for Docker compatibility (same file, different path)
+    if not run_context_path.exists():
+        run_context_path = Path("/data/run_context.json")
+    request_user = ""
+    if run_context_path.exists():
+        try:
+            request_user = json.load(open(run_context_path, "r", encoding="utf-8")).get("user_request", "")
+            if request_user:
+                print(f"[DEBUG] Loaded run_context.json from {run_context_path}")
+        except Exception as e:
+            pass
+    print("[DEBUG] run_context user_request loaded:", bool(request_user))
 
     if not request_user:
         request_user = input("Describe what kind of information would you like to extract: ").strip()

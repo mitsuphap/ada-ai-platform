@@ -20,8 +20,12 @@ def main():
 
     print(f"User request: {user_text}")
     import json
-    with open("run_context.json", "w", encoding="utf-8") as f:
+    # Always write to output/ directory (consistent with other outputs)
+    run_context_path = Path("output/run_context.json")
+    run_context_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(run_context_path, "w", encoding="utf-8") as f:
         json.dump({"user_request": user_text}, f, ensure_ascii=False)
+    print(f"[DEBUG] Saved run_context.json to {run_context_path}")
 
     # NEW: detect vertical
     vertical, det = get_vertical_for_request(user_text)
