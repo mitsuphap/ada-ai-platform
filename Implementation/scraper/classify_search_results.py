@@ -1,23 +1,52 @@
 import os
 import json
 from pathlib import Path
+from typing import Optional, Any
 from dotenv import load_dotenv
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import threading
 import google.generativeai as genai
 
 # NEW: vertical registry
 from verticals import get_vertical_for_request
 
-# Load env
+# Import timing utilities (optional, will work without it)
 try:
-    load_dotenv()
+    from benchmark.benchmark_utils import PerformanceTimer
+except ImportError:
+    # Fallback for when benchmark module is not available
+    try:
+        from benchmark_utils import PerformanceTimer
+    except ImportError:
+        PerformanceTimer = None
+
+# Load env - try multiple locations
+try:
+    from pathlib import Path
+    env_paths = [
+        Path(__file__).parent / ".env",
+        Path(__file__).parent.parent / ".env",
+        Path(__file__).parent.parent.parent / ".env",
+    ]
+    loaded = False
+    for env_path in env_paths:
+        if env_path.exists():
+            load_dotenv(env_path)
+            loaded = True
+            break
+    if not loaded:
+        load_dotenv()  # Try default search
 except:
     pass
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 if not GEMINI_API_KEY:
     raise RuntimeError(
-        "GEMINI_API_KEY is not set in the environment. "
-        "Check docker-compose.yml and .env file."
+        "GEMINI_API_KEY is not set in the environment.\n"
+        "Please set it in one of these ways:\n"
+        "1. Create a .env file in the scraper directory\n"
+        "2. Set environment variable: $env:GEMINI_API_KEY='your_key'\n"
+        "3. Check docker-compose.yml and .env file"
     )
 
 genai.configure(api_key=GEMINI_API_KEY)
@@ -206,7 +235,7 @@ Here are the items (with title, url, snippet, query, rank):
     return results
 
 
-def classify_with_llm(raw_path, output_path, batch_size=10, user_request: str = ""):
+def classify_with_llm(raw_path, output_path, batch_size=10):
     rows = load_ndjson(raw_path)
     print(f"Loaded {len(rows)} raw results")
 
@@ -224,21 +253,30 @@ def classify_with_llm(raw_path, output_path, batch_size=10, user_request: str = 
     # NEW: strict vertical filtering before any LLM calls
     rows = _apply_vertical_validation(user_request, rows, vertical)
 
+    if timer:
+        timer.add_metadata("batch_size", batch_size)
+        timer.add_metadata("max_workers", max_workers)
+        timer.add_metadata("num_results", len(rows))
+
+    # Ensure output directory exists
+    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+    
+    batches = list(chunk_list(rows, batch_size))
     out_file = Path(output_path)
     passed_count = 0
     total_classified = 0
-
+    
     with out_file.open("w", encoding="utf-8") as f_out:
         for idx, batch in enumerate(chunk_list(rows, batch_size)):
             print(f"[LLM] Processing batch {idx}")
 
             minimal_batch = [
                 {
-                    "title": r.get("title"),
-                    "url": r.get("url"),
-                    "snippet": r.get("snippet"),
-                    "query": r.get("query"),
-                    "rank": r.get("rank"),
+                    "title": r["title"],
+                    "url": r["url"],
+                    "snippet": r["snippet"],
+                    "query": r["query"],
+                    "rank": r["rank"],
                 }
                 for r in batch
             ]
@@ -247,8 +285,6 @@ def classify_with_llm(raw_path, output_path, batch_size=10, user_request: str = 
                 minimal_batch,
                 domain_description=DOMAIN_DESCRIPTION,
                 labels=LABELS,
-                user_request=user_request,
-                vertical=vertical,
             )
             lookup = {item["url"]: item for item in labels}
 
@@ -259,36 +295,27 @@ def classify_with_llm(raw_path, output_path, batch_size=10, user_request: str = 
                 r["reason"] = info.get("reason", "no reason provided")
                 total_classified += 1
 
-                # NEW: carry vertical debug info forward
-                if vertical:
-                    r["vertical"] = vertical.name
-                    r["vertical_reason"] = r.get("_vertical_reason")
-                    r["vertical_score_delta"] = r.get("_vertical_score_delta")
-
-                # Filter logic
+                # Filter logic: keep only certain labels if configured
                 if KEEP_LABELS is None:
+                    # Keep everything
                     f_out.write(json.dumps(r, ensure_ascii=False) + "\n")
                     passed_count += 1
                 else:
-                    if r["label"] in KEEP_LABELS and r["confidence"] >= MIN_CONFIDENCE:
+                    if (
+                        r["label"] in KEEP_LABELS
+                        and r["confidence"] >= MIN_CONFIDENCE
+                    ):
                         f_out.write(json.dumps(r, ensure_ascii=False) + "\n")
                         passed_count += 1
                     else:
-                        print(
-                            f"  Filtered out: {r['url'][:60]}... "
-                            f"label={r['label']}, confidence={r['confidence']:.2f}"
-                        )
+                        # Debug: print why result was filtered out
+                        print(f"  Filtered out: {r['url'][:60]}... label={r['label']}, confidence={r['confidence']:.2f}")
 
     print(f"Classification complete. Results saved to {output_path}")
-    print(
-        f"  Total classified: {total_classified}, Passed filter: {passed_count} "
-        f"(confidence >= {MIN_CONFIDENCE}, labels: {KEEP_LABELS})"
-    )
+    print(f"  Total classified: {total_classified}, Passed filter: {passed_count} (confidence >= {MIN_CONFIDENCE}, labels: {KEEP_LABELS})")
 
 
 if __name__ == "__main__":
-    import time
-
     raw_file = "search_results_raw.ndjson"
     out_file = "search_results_classified.ndjson"
 

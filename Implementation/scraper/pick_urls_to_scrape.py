@@ -16,8 +16,8 @@ def load_ndjson(path: str) -> List[Dict[str, Any]]:
 
 
 def main(
-    classified_path: str = "search_results_classified.ndjson",
-    output_path: str = "chosen_seeds.ndjson",
+    classified_path: str = "output/search_results_classified.ndjson",
+    output_path: str = "output/chosen_seeds.ndjson",
 ) -> None:
     """
     Read search_results_raw.ndjson (from google_search.py),

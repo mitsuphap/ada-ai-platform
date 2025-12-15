@@ -38,6 +38,7 @@ def main():
     for q in base_queries:
         print(" -", q)
 
+<<<<<<< HEAD
     # NEW: apply vertical enhancements (domain anchoring / exact name)
     if vertical:
         queries = vertical.enhance_search_queries(user_text, base_queries)
@@ -46,6 +47,14 @@ def main():
             print(" -", q)
     else:
         queries = base_queries
+=======
+    #ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%MZ")
+    output_path = f"output/search_results_raw.ndjson"
+    
+    # Ensure output directory exists
+    from pathlib import Path
+    Path("output").mkdir(exist_ok=True)
+>>>>>>> 6e74a6da7bfe10f09283b0356bfb03647321f5fd
 
     output_path = "search_results_raw.ndjson"
 
