@@ -560,6 +560,144 @@ HTML content:
         return [{"error": str(e)}]
 
 
+# --- DEDUPLICATION HELPERS ------------------------------------
+
+def normalize_name(name: str) -> str:
+    """Normalize name for comparison"""
+    if not name:
+        return ""
+    name = name.lower().strip()
+    # Remove common prefixes
+    name = re.sub(r'^(dr\.?|prof\.?|professor|mr\.?|mrs\.?|ms\.?)\s+', '', name)
+    # Remove suffixes
+    name = re.sub(r'\s+(ph\.?d\.?|jr\.?|sr\.?|iii|ii|iv)$', '', name)
+    return " ".join(name.split())
+
+
+def normalize_phone(phone: str) -> str:
+    """Normalize phone number for comparison"""
+    if not phone:
+        return ""
+    normalized = re.sub(r'[^\d+]', '', phone.strip())
+    if normalized.startswith('+1') and len(normalized) == 12:
+        normalized = normalized[2:]
+    return normalized
+
+
+def get_field_value(payload: Dict[str, Any], possible_keys: List[str]) -> str:
+    """Get value from payload using any of the possible key names"""
+    if not isinstance(payload, dict):
+        return ""
+    payload_lower = {k.lower(): v for k, v in payload.items()}
+    for key in possible_keys:
+        value = payload_lower.get(key.lower(), "")
+        if value and str(value).strip() not in ("", "null", "none"):
+            return str(value).strip()
+    return ""
+
+
+def create_dedup_key(record: Dict[str, Any]) -> Optional[str]:
+    """Create a deduplication key string for a record"""
+    llm_payload = record.get("llm_payload", {})
+    if not isinstance(llm_payload, dict):
+        return None
+    
+    # Get name
+    name = normalize_name(get_field_value(llm_payload, [
+        "name", "agent name", "full_name", "person_name", "contact_name"
+    ]))
+    
+    if not name or name == "entity":
+        return None
+    
+    # Priority 1: Name + Email (if email exists)
+    email = get_field_value(llm_payload, [
+        "contact_email", "email", "e-mail", "e_mail"
+    ]).lower()
+    
+    if email:
+        return f"email:{name}:{email}"
+    
+    # Priority 2: Name + Institution (most reliable for matching)
+    institution = normalize_name(get_field_value(llm_payload, [
+        "institution_name", "agency name", "company", "organization"
+    ]))
+    
+    if institution:
+        return f"institution:{name}:{institution}"
+    
+    # Priority 3: Name + Phone
+    phone = normalize_phone(get_field_value(llm_payload, [
+        "phone", "contact_phone", "phone_number"
+    ]))
+    
+    if phone:
+        return f"phone:{name}:{phone}"
+    
+    # Fallback: Name + URL domain
+    url = record.get("url", "")
+    if url:
+        try:
+            domain = urlparse(url).netloc
+            if domain:
+                return f"domain:{name}:{domain.lower()}"
+        except:
+            pass
+    
+    return None
+
+
+def merge_records(records: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Merge multiple records, keeping best data"""
+    if not records:
+        return {}
+    
+    # Sort by priority: has email > has phone > more fields
+    def priority(r):
+        p = r.get("llm_payload", {})
+        has_email = bool(get_field_value(p, ["contact_email", "email", "e-mail"]))
+        has_phone = bool(get_field_value(p, ["phone", "contact_phone"]))
+        field_count = len([v for v in p.values() if v and str(v).strip() not in ("", "null", "none")])
+        return (has_email, has_phone, field_count)
+    
+    records.sort(key=priority, reverse=True)
+    merged = records[0].copy()
+    llm_payload = merged.get("llm_payload", {}).copy()
+    
+    # Merge data from other records
+    for r in records[1:]:
+        other = r.get("llm_payload", {})
+        
+        # Merge email
+        if not get_field_value(llm_payload, ["contact_email", "email"]):
+            email = get_field_value(other, ["contact_email", "email"])
+            if email:
+                llm_payload["contact_email"] = email
+        
+        # Merge phone
+        if not get_field_value(llm_payload, ["phone", "contact_phone"]):
+            phone = get_field_value(other, ["phone", "contact_phone"])
+            if phone:
+                llm_payload["phone"] = phone
+        
+        # Merge other fields
+        for field in ["title", "description", "website", "address", "city", "country"]:
+            if not get_field_value(llm_payload, [field]):
+                val = get_field_value(other, [field])
+                if val:
+                    llm_payload[field] = val
+        
+        # Track source URLs
+        if "source_urls" not in llm_payload:
+            llm_payload["source_urls"] = [merged.get("url", "")]
+        url = r.get("url", "")
+        if url and url not in llm_payload["source_urls"]:
+            llm_payload["source_urls"].append(url)
+    
+    merged["llm_payload"] = llm_payload
+    return merged
+
+
 # --- MAIN PIPELINE --------------------------------------------
 
 def llm_scrape_from_seeds(
@@ -715,6 +853,73 @@ def llm_scrape_from_seeds(
     else:
         # Still use parallel processing even without timer
         run_parallel_processing()
+    
+    # Deduplicate records
+    print(f"Deduplicating {len(all_records)} records...")
+    
+    # Build index: primary key (name + institution) -> list of records
+    primary_map: Dict[str, List[Dict[str, Any]]] = {}
+    no_key_records = []
+    
+    for record in all_records:
+        llm_payload = record.get("llm_payload", {})
+        name = normalize_name(get_field_value(llm_payload, ["name", "agent name", "full_name"]))
+        institution = normalize_name(get_field_value(llm_payload, ["institution_name", "organization", "company", "agency name"]))
+        
+        if name and name != "entity":
+            # Create primary key: name + institution (if available)
+            if institution:
+                primary_key = f"{name}||{institution}"
+            else:
+                # Fallback: use email or phone if no institution
+                email = get_field_value(llm_payload, ["contact_email", "email"]).lower()
+                if email:
+                    primary_key = f"{name}||email:{email}"
+                else:
+                    phone = normalize_phone(get_field_value(llm_payload, ["phone", "contact_phone"]))
+                    if phone:
+                        primary_key = f"{name}||phone:{phone}"
+                    else:
+                        # Last resort: name only
+                        primary_key = f"{name}||"
+            
+            if primary_key not in primary_map:
+                primary_map[primary_key] = []
+            primary_map[primary_key].append(record)
+        else:
+            no_key_records.append(record)
+    
+    # Merge duplicates
+    deduplicated_records = []
+    duplicates_found = 0
+    
+    for key, records in primary_map.items():
+        if len(records) > 1:
+            # Verify they're actually the same person
+            # Check name matches (should always match since it's in the key)
+            first_name = normalize_name(get_field_value(records[0].get("llm_payload", {}), ["name"]))
+            should_merge = True
+            
+            for r in records[1:]:
+                other_name = normalize_name(get_field_value(r.get("llm_payload", {}), ["name"]))
+                if other_name != first_name:
+                    should_merge = False
+                    break
+            
+            if should_merge:
+                deduplicated_records.append(merge_records(records))
+                duplicates_found += len(records) - 1
+            else:
+                # Names don't match, keep all
+                deduplicated_records.extend(records)
+        else:
+            deduplicated_records.append(records[0])
+    
+    # Add records without keys
+    deduplicated_records.extend(no_key_records)
+    
+    print(f"  Found {duplicates_found} duplicate(s), merged into {len(deduplicated_records)} unique records")
+    all_records = deduplicated_records
     
     # Write all records (always write, regardless of timer)
     with out_file.open("w", encoding="utf-8") as f_out:
