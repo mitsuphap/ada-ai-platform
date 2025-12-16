@@ -133,6 +133,54 @@ def extract_email_candidates(text: str) -> List[str]:
     return list({m.group(0).strip() for m in EMAIL_REGEX.finditer(text)})
 
 
+def is_generic_email(email: str) -> bool:
+    """Check if an email is a generic/role-based email rather than person-specific"""
+    if not email:
+        return True
+    email_lower = email.lower()
+    generic_patterns = [
+        "president@", "info@", "contact@", "admin@", "office@",
+        "support@", "help@", "noreply@", "no-reply@", "webmaster@",
+        "postmaster@", "abuse@", "privacy@", "legal@"
+    ]
+    return any(pattern in email_lower for pattern in generic_patterns)
+
+
+def find_best_email_for_person(email_candidates: List[str], person_name: str) -> Optional[str]:
+    """Find the best email for a person, preferring person-specific emails over generic ones"""
+    if not email_candidates:
+        return None
+    
+    person_name_lower = person_name.lower()
+    # Extract initials/last name from person name for matching
+    name_parts = person_name_lower.split()
+    last_name = name_parts[-1] if name_parts else ""
+    initials = "".join([part[0] for part in name_parts if part]) if len(name_parts) > 1 else ""
+    
+    # Score emails: person-specific > generic
+    scored_emails = []
+    for email in email_candidates:
+        email_lower = email.lower()
+        score = 0
+        
+        # Prefer emails that contain person's name components
+        if last_name and last_name in email_lower:
+            score += 10
+        if initials and initials in email_lower:
+            score += 5
+        
+        # Penalize generic emails
+        if is_generic_email(email):
+            score -= 20
+        
+        scored_emails.append((score, email))
+    
+    # Sort by score (highest first), then by length (shorter = more specific)
+    scored_emails.sort(key=lambda x: (-x[0], len(x[1])))
+    
+    return scored_emails[0][1] if scored_emails else email_candidates[0]
+
+
 # --- LLM INSTRUCTIONS -----------------------------------------
 
 PARSER_INSTRUCTIONS = """
@@ -537,7 +585,6 @@ HTML content:
         )
 
         best_phone = phone_candidates[0] if phone_candidates else None
-        best_email = email_candidates[0] if email_candidates else None
 
         for ent in entities:
             phone_val = ent.get("phone")
@@ -550,8 +597,16 @@ HTML content:
             email_val = ent.get("contact_email") or ent.get("email")
             # Only use regex fallback if LLM didn't extract email AND user wants contact info
             # AND email is actually missing (not empty string from nested structure)
-            if best_email and (email_val in (None, "", "null")) and user_wants_contact:
-                ent["contact_email"] = best_email
+            # Use improved email selection that prefers person-specific emails
+            if email_candidates and (email_val in (None, "", "null")) and user_wants_contact:
+                person_name = ent.get("name", "")
+                best_email = find_best_email_for_person(email_candidates, person_name)
+                # Only use if it's not a generic email (unless no other option)
+                if best_email and not is_generic_email(best_email):
+                    ent["contact_email"] = best_email
+                elif best_email and not email_val:
+                    # Fallback: use generic email only if no email was found at all
+                    ent["contact_email"] = best_email
 
         return entities
 
@@ -652,13 +707,15 @@ def merge_records(records: List[Dict[str, Any]]) -> Dict[str, Any]:
     if not records:
         return {}
     
-    # Sort by priority: has email > has phone > more fields
+    # Sort by priority: has person-specific email > has generic email > has phone > more fields
     def priority(r):
         p = r.get("llm_payload", {})
-        has_email = bool(get_field_value(p, ["contact_email", "email", "e-mail"]))
+        email = get_field_value(p, ["contact_email", "email", "e-mail"])
+        has_person_email = bool(email and not is_generic_email(email))
+        has_generic_email = bool(email and is_generic_email(email))
         has_phone = bool(get_field_value(p, ["phone", "contact_phone"]))
         field_count = len([v for v in p.values() if v and str(v).strip() not in ("", "null", "none")])
-        return (has_email, has_phone, field_count)
+        return (has_person_email, has_generic_email, has_phone, field_count)
     
     records.sort(key=priority, reverse=True)
     merged = records[0].copy()
@@ -668,11 +725,17 @@ def merge_records(records: List[Dict[str, Any]]) -> Dict[str, Any]:
     for r in records[1:]:
         other = r.get("llm_payload", {})
         
-        # Merge email
-        if not get_field_value(llm_payload, ["contact_email", "email"]):
-            email = get_field_value(other, ["contact_email", "email"])
-            if email:
-                llm_payload["contact_email"] = email
+        # Merge email - prefer person-specific over generic
+        current_email = get_field_value(llm_payload, ["contact_email", "email"])
+        other_email = get_field_value(other, ["contact_email", "email"])
+        
+        if not current_email:
+            if other_email:
+                llm_payload["contact_email"] = other_email
+        elif other_email:
+            # Replace generic email with person-specific email
+            if is_generic_email(current_email) and not is_generic_email(other_email):
+                llm_payload["contact_email"] = other_email
         
         # Merge phone
         if not get_field_value(llm_payload, ["phone", "contact_phone"]):
