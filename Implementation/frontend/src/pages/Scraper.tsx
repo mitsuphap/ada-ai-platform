@@ -136,96 +136,6 @@ export default function Scraper() {
     return requestedFields
   }
 
-  // Check if requested fields are missing
-  const getMissingFields = (dataSpec: string, payload: any): string[] => {
-    if (!dataSpec || !payload) return []
-    
-    const requestedFields = detectRequestedFields(dataSpec)
-    
-    // Safety check: if no fields detected, don't show any missing fields
-    if (requestedFields.length === 0) {
-      // console.log('[DEBUG] No fields detected, returning empty missing array')
-      return []
-    }
-    
-    // CRITICAL: Explicitly filter out price fields if they weren't requested
-    const filteredRequestedFields = requestedFields.filter(field => {
-      if ((field === 'price' || field === 'price_numeric')) {
-        // Only include price if explicitly requested
-        const hasPriceKeyword = dataSpec.toLowerCase().match(/\b(price|prices|pricing|how much|dollar|dollars|\$|cost of|costs of|what does it cost)\b/i)
-        if (!hasPriceKeyword) {
-          // console.log('[DEBUG] Filtering out price field - not explicitly requested')
-          return false
-        }
-      }
-      return true
-    })
-    
-    const missing: string[] = []
-    const missingSet = new Set<string>() // Use Set to avoid duplicates
-    
-    // Check if price fields are requested (after filtering)
-    const wantsPrice = filteredRequestedFields.includes('price') || filteredRequestedFields.includes('price_numeric')
-    
-    // ONLY check fields that were actually requested (use filtered list)
-    filteredRequestedFields.forEach(field => {
-      // Special handling for price fields - consider price found if either price or price_numeric exists
-      // IMPORTANT: Only check price if it was explicitly requested
-      if ((field === 'price' || field === 'price_numeric') && wantsPrice) {
-        if (!missingSet.has('Price')) {
-          const hasPrice = (payload.price !== null && payload.price !== undefined && 
-                           (typeof payload.price === 'string' ? payload.price.trim() !== '' : true)) ||
-                          (payload.price_numeric !== null && payload.price_numeric !== undefined && 
-                           payload.price_numeric > 0)
-          if (!hasPrice) {
-            missing.push('Price')
-            missingSet.add('Price')
-          }
-        }
-        return // Skip the normal check for price fields
-      }
-      
-      // Skip price fields entirely if they weren't requested
-      if (field === 'price' || field === 'price_numeric') {
-        return
-      }
-      
-      const value = payload[field]
-      const isEmpty = value === null || value === undefined || 
-                     (Array.isArray(value) && value.length === 0) ||
-                     (typeof value === 'string' && value.trim() === '')
-      
-      if (isEmpty) {
-        // Convert field name to readable label
-        const label = field.split('_').map(w => 
-          w.charAt(0).toUpperCase() + w.slice(1)
-        ).join(' ')
-        
-        // Avoid duplicates
-        if (!missingSet.has(label)) {
-          missing.push(label)
-          missingSet.add(label)
-        }
-      }
-    })
-    
-    // Final safety check: Remove any price-related missing fields if price wasn't requested
-    const finalMissing = missing.filter(label => {
-      const labelLower = label.toLowerCase()
-      // If price wasn't requested, remove any price-related labels
-      if (!wantsPrice && (labelLower.includes('price') || labelLower === 'cost' || labelLower === 'costs')) {
-        // Debug: Log if we're filtering out price
-        // console.log('Filtering out price from missing fields - price was not requested')
-        return false
-      }
-      return true
-    })
-    
-    // Debug: Log detected and missing fields (disabled for production)
-    // console.log('[DEBUG] Requested fields:', requestedFields, 'Missing:', finalMissing, 'Wants price:', wantsPrice, 'Payload keys:', Object.keys(payload))
-    
-    return finalMissing
-  }
 
   const handleSearch = async () => {
     if (!topic.trim()) {
@@ -560,99 +470,42 @@ export default function Scraper() {
             )}
 
             {/* Summary of data extraction results */}
-            {topic && (() => {
-              // Filter out failed entities (http_error, etc.)
-              const successfulEntities = scrapedData.filter(item => 
-                item.scraped_status === 'ok' && item.llm_payload
-              )
-              
-              const failedEntities = scrapedData.filter(item => item.scraped_status !== 'ok')
-              
-              const requestedFields = detectRequestedFields(topic)
-              
-              // Count entities that have ALL requested fields (only from successful ones)
-              const entitiesWithData = successfulEntities.filter(item => {
-                // Entity has data only if ALL requested fields are present
-                return requestedFields.every(field => {
-                  // Special handling for price fields - consider price found if either price or price_numeric exists
-                  if (field === 'price' || field === 'price_numeric') {
-                    const hasPrice = (item.llm_payload.price !== null && item.llm_payload.price !== undefined && 
-                                     (typeof item.llm_payload.price === 'string' ? item.llm_payload.price.trim() !== '' : true)) ||
-                                    (item.llm_payload.price_numeric !== null && item.llm_payload.price_numeric !== undefined && 
-                                     item.llm_payload.price_numeric > 0)
-                    return hasPrice
-                  }
-                  
-                  const value = item.llm_payload[field]
-                  return value !== null && value !== undefined && 
-                         !(Array.isArray(value) && value.length === 0) &&
-                         !(typeof value === 'string' && value.trim() === '')
-                })
-              }).length
-              
-              const entitiesWithMissing = successfulEntities.length - entitiesWithData
-              
-              if (scrapedData.length > 0) {
-                return (
-                  <>
-                    <div className={`border rounded-lg p-4 mb-4 ${
-                      entitiesWithData > 0 
-                        ? 'bg-green-50 border-green-200' 
-                        : 'bg-amber-50 border-amber-200'
-                    }`}>
-                      <div className="flex items-start gap-2">
-                        <span className={entitiesWithData > 0 ? 'text-green-600' : 'text-amber-600'}>
-                          {entitiesWithData > 0 ? '✅' : '⚠️'}
-                        </span>
-                        <div>
-                          <p className={`text-sm font-medium ${
-                            entitiesWithData > 0 ? 'text-green-900' : 'text-amber-900'
-                          }`}>
-                            {entitiesWithData} of {successfulEntities.length} entities have the requested data
-                            {entitiesWithMissing > 0 && (
-                              <span className="text-amber-700"> ({entitiesWithMissing} missing)</span>
-                            )}
-                            {failedEntities.length > 0 && (
-                              <span className="text-gray-600"> • {failedEntities.length} failed to load</span>
-                            )}
-                          </p>
-                          <p className={`text-xs mt-1 ${
-                            entitiesWithData > 0 ? 'text-green-700' : 'text-amber-700'
-                          }`}>
-                            Requested: "{topic}"
-                          </p>
-                        </div>
+            {topic && scrapedData.length > 0 && (
+              <>
+                <div className="border rounded-lg p-4 mb-4 bg-blue-50 border-blue-200">
+                  <p className="text-sm text-blue-900">
+                    <span className="font-medium">Requested:</span> "{topic}"
+                  </p>
+                </div>
+                
+                {/* Show failed URLs in collapsed section */}
+                {(() => {
+                  const failedEntities = scrapedData.filter(item => item.scraped_status !== 'ok')
+                  return failedEntities.length > 0 ? (
+                    <details className="mb-4 border border-gray-200 rounded-lg p-3 bg-gray-50">
+                      <summary className="cursor-pointer text-sm text-gray-600 hover:text-gray-800 font-medium">
+                        {failedEntities.length} URL{failedEntities.length !== 1 ? 's' : ''} failed to load (click to view)
+                      </summary>
+                      <div className="mt-3 space-y-2 pl-4 border-l-2 border-gray-300">
+                        {failedEntities.map((item, idx) => (
+                          <div key={idx} className="text-xs text-gray-600 py-1">
+                            <a 
+                              href={item.url} 
+                              target="_blank" 
+                              rel="noopener noreferrer" 
+                              className="text-blue-600 hover:underline break-all"
+                            >
+                              {item.url}
+                            </a>
+                            <span className="ml-2 text-gray-500">({item.scraped_status})</span>
+                          </div>
+                        ))}
                       </div>
-                    </div>
-                    
-                    {/* Show failed URLs in collapsed section */}
-                    {failedEntities.length > 0 && (
-                      <details className="mb-4 border border-gray-200 rounded-lg p-3 bg-gray-50">
-                        <summary className="cursor-pointer text-sm text-gray-600 hover:text-gray-800 font-medium">
-                          {failedEntities.length} URL{failedEntities.length !== 1 ? 's' : ''} failed to load (click to view)
-                        </summary>
-                        <div className="mt-3 space-y-2 pl-4 border-l-2 border-gray-300">
-                          {failedEntities.map((item, idx) => (
-                            <div key={idx} className="text-xs text-gray-600 py-1">
-                              <a 
-                                href={item.url} 
-                                target="_blank" 
-                                rel="noopener noreferrer" 
-                                className="text-blue-600 hover:underline break-all"
-                              >
-                                {item.url}
-                              </a>
-                              <span className="ml-2 text-gray-500">({item.scraped_status})</span>
-                            </div>
-                          ))}
-                        </div>
-                      </details>
-                    )}
-                  </>
-                )
-              }
-              return null
-            })()}
+                    </details>
+                  ) : null
+                })()}
+              </>
+            )}
 
             <div className="space-y-4">
               {scrapedData
@@ -672,15 +525,6 @@ export default function Scraper() {
                         {new Date(item.scraped_at).toLocaleString()}
                       </span>
                     )}
-                    {/* Show missing fields badge */}
-                    {topic && item.llm_payload && (() => {
-                      const missing = getMissingFields(topic, item.llm_payload)
-                      return missing.length > 0 ? (
-                        <span className="inline-block text-xs px-2 py-1 rounded font-medium bg-amber-100 text-amber-700">
-                          Missing: {missing.join(', ')}
-                        </span>
-                      ) : null
-                    })()}
                   </div>
                   
                   {item.llm_payload ? (
