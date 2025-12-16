@@ -646,6 +646,10 @@ def scrape_more(request: ScrapeRequest):
 @app.on_event("startup")
 async def startup_event():
     """Generate API routes automatically on startup with fresh schema introspection"""
+    # DISABLED: Auto-generation disabled per user request
+    print("ℹ️  Auto-generation of API routes is disabled")
+    return
+    
     db = None
     try:
         # Try to connect to database
