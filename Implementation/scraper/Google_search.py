@@ -1,6 +1,8 @@
 import os
+import logging
 import requests
 import json
+from contextlib import nullcontext
 from datetime import datetime, timezone
 from urllib.parse import urlparse, urlunparse
 from typing import Optional, Any
@@ -14,13 +16,13 @@ except ImportError:
 from dotenv import load_dotenv
 load_dotenv()
 
+logger = logging.getLogger("ada.google_search")
+
 API_KEY = os.getenv("GOOGLE_CSE_API_KEY")
 CX = os.getenv("GOOGLE_CSE_CX")
 
-print("[CSE DEBUG] API_KEY set:", bool(API_KEY))
-print("[CSE DEBUG] CX set:", bool(CX))
-print("[CSE DEBUG] CX:", CX)
-print("[CSE DEBUG] KEY prefix:", (API_KEY or "")[:6])
+# Never log secret values; only whether they are configured.
+logger.debug("CSE API_KEY set: %s, CX set: %s", bool(API_KEY), bool(CX))
 
 if not API_KEY or not CX:
     raise RuntimeError("Missing GOOGLE_CSE_API_KEY or GOOGLE_CSE_CX (check .env / terminal env).")
@@ -102,55 +104,12 @@ def call_google_search_save(
         timer.add_metadata("results_per_query", results_per_query)
 
     all_results = []
-    
-    if timer:
-        with timer.stage("google_cse_api_calls"):
-            for q in queries:
-                print(f"[CSE] Query: {q}")
-                params = {
-                    "key": API_KEY,
-                    "cx": CX,
-                    "q": q,
-                    "num": results_per_query,
-                }
-                r = requests.get(CSE_URL, params=params, timeout=20)
-                r.raise_for_status()
-                data = r.json()
 
-                items = data.get("items", [])
-                rank = 1  # rank per query
-
-                for item in items:
-                    result_url = item.get("link")
-                    if not result_url:
-                        continue
-
-                    if is_blocked(result_url):
-                        continue
-
-                    norm = normalize_url(result_url)
-                    if norm in seen_urls:
-                        # already saw this page from a previous query, skip duplicate
-                        continue
-
-                    seen_urls.add(norm)
-
-                    now = datetime.now(timezone.utc).isoformat()
-                    row = {
-                        "query": q,
-                        "rank": rank,
-                        "title": item.get("title"),
-                        "url": result_url,
-                        "normalized_url": norm,
-                        "snippet": item.get("snippet", ""),
-                        "source": "google_cse",
-                        "scraped_at": now,
-                    }
-                    all_results.append(row)
-                    rank += 1
-    else:
+    # Single code path; the optional timer just wraps the API calls in a stage.
+    stage = timer.stage("google_cse_api_calls") if timer else nullcontext()
+    with stage:
         for q in queries:
-            print(f"[CSE] Query: {q}")
+            logger.info("CSE query: %s", q)
             params = {
                 "key": API_KEY,
                 "cx": CX,
@@ -159,7 +118,7 @@ def call_google_search_save(
             }
             r = requests.get(CSE_URL, params=params, timeout=20)
             if r.status_code != 200:
-                print("[CSE ERROR]", r.status_code, r.text[:500])
+                logger.error("CSE error %s: %s", r.status_code, r.text[:500])
                 r.raise_for_status()
             data = r.json()
 
@@ -204,4 +163,4 @@ def call_google_search_save(
         timer.add_metadata("total_results", len(all_results))
         timer.add_metadata("unique_urls", len(seen_urls))
     
-    print(f"Saved {len(all_results)} search results to {output_path}")
+    logger.info("Saved %d search results to %s", len(all_results), output_path)

@@ -1,20 +1,14 @@
 import axios from 'axios'
 
+// Base URL comes from VITE_API_URL at build time. In local dev it falls back to
+// the Vite proxy (`/api` -> http://localhost:8000, see vite.config.js).
+const baseURL = import.meta.env.VITE_API_URL ?? '/api'
+
 const api = axios.create({
-  baseURL: import.meta.env.VITE_API_URL || '/api',  // Use env var or fallback to proxy
+  baseURL,
   headers: {
     'Content-Type': 'application/json',
   },
 })
 
-// Optional: Add request interceptor for error handling
-api.interceptors.response.use(
-  (response) => response,
-  (error) => {
-    console.error('API Error:', error)
-    return Promise.reject(error)
-  }
-)
-
 export default api
-

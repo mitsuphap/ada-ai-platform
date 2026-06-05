@@ -1006,17 +1006,12 @@ if __name__ == "__main__":
     if run_context_path.exists():
         try:
             request_user = json.load(open(run_context_path, "r", encoding="utf-8")).get("user_request", "")
-            if request_user:
-                print(f"[DEBUG] Loaded run_context.json from {run_context_path}")
-        except Exception as e:
+        except Exception:
             pass
-    print("[DEBUG] run_context user_request loaded:", bool(request_user))
 
     if not request_user:
         request_user = input("Describe what kind of information would you like to extract: ").strip()
 
-    print("[DEBUG] calling llm_scrape_from_seeds now...")
-    
     # Use timer if available
     if PerformanceTimer:
         timer = PerformanceTimer("scraping")
@@ -1029,5 +1024,3 @@ if __name__ == "__main__":
         llm_scrape_from_seeds(user_request=request_user)
         end = time.time()
         print(f"Completed in {end - start:.2f} seconds.")
-    
-    print("[DEBUG] finished llm_scrape_from_seeds")

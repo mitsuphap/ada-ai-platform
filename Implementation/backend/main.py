@@ -8,6 +8,7 @@ from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
 from app.db import get_engine, get_db
 from app.auto_generator import auto_generate_all_routers, get_available_auto_tables
+from app import runs as runs_repo
 from pydantic import BaseModel
 from typing import List, Optional
 import sys
@@ -15,13 +16,43 @@ from pathlib import Path
 import tempfile
 import os
 import json
+import logging
+from contextlib import asynccontextmanager
 
-# Manual routers removed - using auto-generation only
+logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
+logger = logging.getLogger("ada")
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Introspect the database on startup and register auto-generated CRUD routers.
+
+    If the database is unavailable the app still boots in scraper-only mode so the
+    /scraper/* endpoints keep working.
+    """
+    logger.info("Starting up: attempting database connection for auto-generated API...")
+    db = None
+    try:
+        get_engine().dispose()
+        db = next(get_db())
+        db.execute(text("SELECT 1"))
+        auto_routers = auto_generate_all_routers(db)
+        for router in auto_routers:
+            app.include_router(router)
+        logger.info("Registered %d auto-generated API routers", len(auto_routers))
+    except Exception as e:
+        logger.warning("Database/auto-API unavailable (%s); running in scraper-only mode", e)
+    finally:
+        if db:
+            db.close()
+    yield
+
 
 app = FastAPI(
     title="Ada Automated Data Intelligence",
     description="Self-generating REST API with automatic endpoint creation based on database schema",
-    version="2.0.0"
+    version="2.0.0",
+    lifespan=lifespan,
 )
 
 # Add rate limiting
@@ -29,12 +60,15 @@ limiter = Limiter(key_func=get_remote_address)
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
-# --- CORS: enable during dev; tighten origins later ---
-# Note: FastAPI CORS doesn't support wildcards like "*.vercel.app", use "*" for all origins
+# --- CORS ---
+# Origins are read from CORS_ALLOW_ORIGINS (comma-separated). Falls back to local
+# dev origins so the app still works out of the box. Avoid the insecure "*" default.
+_cors_env = os.getenv("CORS_ALLOW_ORIGINS", "http://localhost:3000,http://localhost:5173")
+ALLOWED_ORIGINS = [origin.strip() for origin in _cors_env.split(",") if origin.strip()]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Allow all origins for now (can restrict later)
-    allow_credentials=False,  # Must be False when using "*" for origins
+    allow_origins=ALLOWED_ORIGINS,
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -112,6 +146,7 @@ class SaveSeedsRequest(BaseModel):
 class ScrapeRequest(BaseModel):
     topic: Optional[str] = None
     data_specification: Optional[str] = None
+    run_id: Optional[int] = None
 
 class LegacyScrapeRequest(BaseModel):
     urls: List[str]
@@ -121,6 +156,7 @@ class LegacyScrapeRequest(BaseModel):
 class ScrapeResponse(BaseModel):
     results: List[dict]
     message: str
+    run_id: Optional[int] = None
     total_available_links: Optional[int] = None
     scraped_count: Optional[int] = None
     has_more: Optional[bool] = None
@@ -133,13 +169,47 @@ if not scraper_path.exists():
     scraper_path = Path(__file__).parent.parent / "scraper"  # Local dev: scraper is sibling to backend
 if scraper_path.exists():
     sys.path.insert(0, str(scraper_path))
-    print(f"✅ Added scraper path to sys.path: {scraper_path}")
+    logger.info("Added scraper path to sys.path: %s", scraper_path)
 else:
-    print(f"⚠️  Warning: Scraper path not found. Searched: /app/scraper, {Path(__file__).parent / 'scraper'}, {Path(__file__).parent.parent / 'scraper'}")
+    logger.warning("Scraper path not found near %s", Path(__file__).parent)
 
 # Output directory - mounted at /data in Docker, or use scraper/output locally
 OUTPUT_DIR = Path("/data") if Path("/data").exists() else Path(__file__).parent.parent / "scraper" / "output"
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def run_working_dir(run_id: int) -> Path:
+    """Per-run scratch directory for intermediate ndjson files.
+
+    Isolating intermediate files per run prevents concurrent requests from
+    overwriting each other's shared files (the previous behaviour).
+    """
+    d = OUTPUT_DIR / "runs" / str(run_id)
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def _build_custom_instructions(request: "ScrapeRequest", base_instructions: str) -> Optional[str]:
+    """Augment parser instructions when a distinct data_specification is given."""
+    if request.data_specification and request.data_specification != request.topic:
+        return (
+            base_instructions
+            + f"\n\nIMPORTANT: The user specifically wants to extract: {request.data_specification}. "
+            "Make sure to prioritize and extract this information prominently. If this information is "
+            "not found on the page, set the relevant field(s) to null but ensure you thoroughly search for it."
+        )
+    return None
+
+
+def _load_ndjson_results(path: Path) -> List[dict]:
+    """Read an ndjson file into a list of dicts (empty list if missing)."""
+    results: List[dict] = []
+    if path.exists():
+        with open(path, "r", encoding="utf-8") as f:
+            for line in f:
+                if line.strip():
+                    results.append(json.loads(line))
+    return results
 
 # Test route to verify registration works
 @app.get("/scraper/test")
@@ -166,21 +236,13 @@ def generate_and_search(request: SearchRequest, http_request: Request):
         with open(run_context_path, "w", encoding="utf-8") as f:
             json.dump({"user_request": topic_with_spec}, f, ensure_ascii=False)
         
-        # NEW: detect vertical and enhance queries (like discovery_search.py)
+        # Detect vertical and enhance queries
         vertical, det = get_vertical_for_request(topic_with_spec)
         if vertical:
-            print(f"[vertical] {vertical.name} conf={det.confidence:.2f} reason={det.reason}")
-        else:
-            print("[vertical] none")
-        
+            logger.info("Vertical %s (conf=%.2f)", vertical.name, det.confidence)
+
         base_queries = generate_queries_with_gemini(topic_with_spec, n=5)
-        
-        # Apply vertical enhancements (domain anchoring / exact name)
-        if vertical:
-            queries = vertical.enhance_search_queries(topic_with_spec, base_queries)
-            print(f"[API] Vertical-enhanced queries: {len(queries)} queries")
-        else:
-            queries = base_queries
+        queries = vertical.enhance_search_queries(topic_with_spec, base_queries) if vertical else base_queries
         
         # Save to search_results_raw.ndjson in output directory (matches script workflow)
         output_path = OUTPUT_DIR / "search_results_raw.ndjson"
@@ -378,336 +440,201 @@ def scrape_selected_urls(request: LegacyScrapeRequest, http_request: Request):
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/scraper/search-and-scrape-auto", response_model=ScrapeResponse)
-def search_and_scrape_auto(request: ScrapeRequest):
-    """Complete automated flow: Search -> Classify -> Filter (confidence >= 0.95) -> Auto-scrape"""
+def search_and_scrape_auto(request: ScrapeRequest, db: Session = Depends(get_db)):
+    """Complete automated flow: Search -> Classify -> Filter (confidence >= 0.95) -> Auto-scrape.
+
+    Each call is tracked as a row in core.runs; intermediate ndjson files live in a
+    per-run directory (so concurrent requests don't collide), and final results are
+    persisted to core.results keyed by run_id.
+    """
     import time
+
+    if not request.topic:
+        raise HTTPException(status_code=400, detail="Topic is required")
+
+    if request.data_specification:
+        topic_with_spec = f"{request.topic}. Focus on finding: {request.data_specification}"
+    else:
+        topic_with_spec = request.topic
+
+    run_id = runs_repo.create_run(db, topic_with_spec)
+    work_dir = run_working_dir(run_id)
     start_time = time.time()
-    stage_times = {}
-    
+
     try:
-        # Validate topic is provided
-        if not request.topic:
-            raise HTTPException(status_code=400, detail="Topic is required")
-        
         from query_generator import generate_queries_with_gemini
         from Google_search import call_google_search_save
         from classify_search_results import classify_with_llm
         from llm_scrape_from_seeds import llm_scrape_from_seeds, PARSER_INSTRUCTIONS
         from verticals import get_vertical_for_request
-        
-        # Step 1: Generate queries and search
-        step_start = time.time()
-        if request.data_specification:
-            topic_with_spec = f"{request.topic}. Focus on finding: {request.data_specification}"
-        else:
-            topic_with_spec = request.topic
-        
-        # Save user_request to run_context.json in output/ directory (consistent location)
-        run_context_path = OUTPUT_DIR / "run_context.json"  # Docker: /data/run_context.json, Local: scraper/output/run_context.json
-        run_context_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(run_context_path, "w", encoding="utf-8") as f:
+
+        # Step 1: Generate queries and search (within this run's working dir)
+        with open(work_dir / "run_context.json", "w", encoding="utf-8") as f:
             json.dump({"user_request": topic_with_spec}, f, ensure_ascii=False)
-        
-        # NEW: detect vertical and enhance queries (like discovery_search.py)
+
         vertical, det = get_vertical_for_request(topic_with_spec)
         if vertical:
-            print(f"[vertical] {vertical.name} conf={det.confidence:.2f} reason={det.reason}")
-        else:
-            print("[vertical] none")
-        
+            logger.info("Vertical %s (conf=%.2f) for run %d", vertical.name, det.confidence, run_id)
+
         base_queries = generate_queries_with_gemini(topic_with_spec, n=5)
-        
-        # Apply vertical enhancements (domain anchoring / exact name)
-        if vertical:
-            queries = vertical.enhance_search_queries(topic_with_spec, base_queries)
-            print(f"[API] Vertical-enhanced queries: {len(queries)} queries")
-        else:
-            queries = base_queries
-        
-        raw_results_path = OUTPUT_DIR / "search_results_raw.ndjson"
+        queries = vertical.enhance_search_queries(topic_with_spec, base_queries) if vertical else base_queries
+
+        raw_results_path = work_dir / "search_results_raw.ndjson"
         call_google_search_save(queries, output_path=str(raw_results_path), results_per_query=10)
-        stage_times["query_generation_and_search"] = time.time() - step_start
-        print(f"[TIMING] Query generation + search: {stage_times['query_generation_and_search']:.2f}s")
-        
-        # Step 2: Classify search results (already filters by confidence >= 0.95)
-        step_start = time.time()
-        classified_results_path = OUTPUT_DIR / "search_results_classified.ndjson"
-        # Build user_request for classification (use topic_with_spec)
-        user_request_for_classify = topic_with_spec
+
+        # Step 2: Classify (filters by confidence >= 0.95 + KEEP_LABELS)
+        classified_results_path = work_dir / "search_results_classified.ndjson"
         classify_with_llm(
             raw_path=str(raw_results_path),
             output_path=str(classified_results_path),
-            user_request=user_request_for_classify,
-            batch_size=20,  # Larger batches = fewer API calls
-            max_workers=5  # More parallel workers for classification
+            user_request=topic_with_spec,
+            batch_size=20,
+            max_workers=5,
         )
-        stage_times["classification"] = time.time() - step_start
-        print(f"[TIMING] Classification: {stage_times['classification']:.2f}s")
-        
-        # Step 3: Check if we have any classified results
-        # Note: classify_with_llm already filters by confidence >= 0.95 and KEEP_LABELS
-        # So search_results_classified.ndjson contains only filtered results (like terminal workflow)
+
         if not classified_results_path.exists():
+            runs_repo.update_run_status(db, run_id, "done")
             return ScrapeResponse(
-                results=[],
+                results=[], run_id=run_id,
                 message="No classified results found. Classification may have failed.",
-                total_available_links=0,
-                scraped_count=0,
-                has_more=False
+                total_available_links=0, scraped_count=0, has_more=False,
             )
-        
-        # Count total available links for reporting
-        total_available = 0
-        with open(classified_results_path, 'r', encoding='utf-8') as f:
-            for line in f:
-                if line.strip():
-                    total_available += 1
-        
+
+        total_available = sum(
+            1 for line in classified_results_path.read_text(encoding="utf-8").splitlines() if line.strip()
+        )
         if total_available == 0:
+            runs_repo.update_run_status(db, run_id, "done")
             return ScrapeResponse(
-                results=[],
+                results=[], run_id=run_id,
                 message="No results found with confidence >= 0.95 after classification.",
-                total_available_links=0,
-                scraped_count=0,
-                has_more=False
+                total_available_links=0, scraped_count=0, has_more=False,
             )
-        
-        # Step 4: Build user_request for scraping (use topic directly, like terminal)
-        # Match terminal workflow: pass the full topic as user_request
-        user_request = request.topic if request.topic else "Extract a general profile of each entity."
-        print(f"[API] Received topic: {request.topic}")
-        print(f"[API] Using user_request: {user_request}")
-        
-        # Modify PARSER_INSTRUCTIONS if data_specification provided (but don't duplicate topic)
-        custom_instructions = None
-        if request.data_specification and request.data_specification != request.topic:
-            custom_instructions = PARSER_INSTRUCTIONS + f"\n\nIMPORTANT: The user specifically wants to extract: {request.data_specification}. Make sure to prioritize and extract this information prominently. If this information is not found on the page, set the relevant field(s) to null but ensure you thoroughly search for it."
-        
-        # Step 5: Scrape automatically from search_results_classified.ndjson (like terminal)
-        # Use classified file directly instead of creating chosen_seeds.ndjson
-        step_start = time.time()
-        output_path = OUTPUT_DIR / "discovered_sites.ndjson"
-        print(f"[API] Output will be written to: {output_path}")
-        # Ensure output file is cleared before scraping (in case of previous runs)
-        if output_path.exists():
-            output_path.unlink()
-            print(f"[API] Cleared existing output file")
+
+        # Step 3: Scrape directly from the classified file
+        user_request = request.topic or "Extract a general profile of each entity."
+        custom_instructions = _build_custom_instructions(request, PARSER_INSTRUCTIONS)
+
+        output_path = work_dir / "discovered_sites.ndjson"
         llm_scrape_from_seeds(
-            seeds_path=str(classified_results_path),  # Read directly from classified file (like terminal)
+            seeds_path=str(classified_results_path),
             output_path=str(output_path),
-            delay_seconds=0.0,  # No delay needed with parallel processing
+            delay_seconds=0.0,
             user_request=user_request,
             custom_parser_instructions=custom_instructions,
-            max_workers=10,  # Parallel HTML fetching
-            llm_workers=10  # More parallel LLM workers for faster processing
+            max_workers=10,
+            llm_workers=10,
         )
-        stage_times["scraping"] = time.time() - step_start
-        print(f"[TIMING] Scraping: {stage_times['scraping']:.2f}s")
-        
-        # Load and return results
-        step_start = time.time()
-        results = []
-        if output_path.exists():
-            with open(output_path, 'r', encoding='utf-8') as f:
-                for line in f:
-                    if line.strip():
-                        results.append(json.loads(line))
-        stage_times["loading_results"] = time.time() - step_start
-        
+
+        results = _load_ndjson_results(output_path)
+
+        # Persist results to the database and mark the run complete.
+        runs_repo.save_results(db, run_id, results)
+        runs_repo.update_run_status(db, run_id, "done")
+
         total_time = time.time() - start_time
-        stage_times["total"] = total_time
-        print(f"[TIMING] Loading results: {stage_times['loading_results']:.2f}s")
-        print(f"[TIMING] TOTAL API TIME: {total_time:.2f}s ({total_time/60:.2f} minutes)")
-        
+        logger.info("Run %d finished in %.1fs (%d results)", run_id, total_time, len(results))
+
         return ScrapeResponse(
             results=results,
+            run_id=run_id,
             message=f"Scraped {len(results)} URLs (confidence >= 0.95). {total_available} total links were available. Processing time: {total_time:.1f}s",
             total_available_links=total_available,
             scraped_count=len(results),
-            has_more=False  # All filtered results are scraped in one go (like terminal)
+            has_more=False,
         )
+    except HTTPException:
+        runs_repo.update_run_status(db, run_id, "error", "request failed")
+        raise
     except Exception as e:
+        runs_repo.update_run_status(db, run_id, "error", str(e))
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/scraper/scrape-more", response_model=ScrapeResponse)
-def scrape_more(request: ScrapeRequest):
-    """Scrape the next batch of links (next 10) from remaining candidates"""
+def scrape_more(request: ScrapeRequest, db: Session = Depends(get_db)):
+    """Scrape the next batch of candidates for an existing run, skipping already-scraped URLs."""
+    if not request.run_id:
+        raise HTTPException(status_code=400, detail="run_id is required")
+    if not request.topic:
+        raise HTTPException(status_code=400, detail="Topic is required")
+
+    run_id = request.run_id
+    work_dir = run_working_dir(run_id)
+    classified_results_path = work_dir / "search_results_classified.ndjson"
+    if not classified_results_path.exists():
+        raise HTTPException(status_code=404, detail="No candidates found for this run.")
+
     try:
-        # Validate topic is provided
-        if not request.topic:
-            raise HTTPException(status_code=400, detail="Topic is required")
-        
         from llm_scrape_from_seeds import llm_scrape_from_seeds, PARSER_INSTRUCTIONS
-        
-        # Load all candidates
-        all_candidates_path = OUTPUT_DIR / "all_candidates.ndjson"
-        if not all_candidates_path.exists():
-            raise HTTPException(status_code=404, detail="No candidates found. Please run a search first.")
-        
-        # Load already scraped URLs to avoid duplicates
-        discovered_sites_path = OUTPUT_DIR / "discovered_sites.ndjson"
-        scraped_urls = set()
-        if discovered_sites_path.exists():
-            with open(discovered_sites_path, 'r', encoding='utf-8') as f:
-                for line in f:
-                    if line.strip():
-                        result = json.loads(line)
-                        url = result.get("url", "")
-                        if url:
-                            scraped_urls.add(url.rstrip('/').lower())
-        
-        # Load all candidates and filter out already scraped ones
-        all_candidates = []
-        with open(all_candidates_path, 'r', encoding='utf-8') as f:
-            for line in f:
-                if line.strip():
-                    candidate = json.loads(line)
-                    normalized_url = candidate.get("url", "").rstrip('/').lower()
-                    if normalized_url not in scraped_urls:
-                        all_candidates.append(candidate)
-        
-        if len(all_candidates) == 0:
+
+        # URLs already persisted for this run, to avoid re-scraping.
+        scraped_urls = {
+            (r.get("url") or "").rstrip("/").lower()
+            for r in runs_repo.get_results(db, run_id)
+            if r.get("url")
+        }
+
+        candidates = [
+            c for c in _load_ndjson_results(classified_results_path)
+            if (c.get("url", "").rstrip("/").lower()) not in scraped_urls
+        ]
+        if not candidates:
             return ScrapeResponse(
-                results=[],
+                results=[], run_id=run_id,
                 message="No more links to scrape. All available links have been scraped.",
-                total_available_links=0,
-                scraped_count=0,
-                has_more=False
+                total_available_links=0, scraped_count=0, has_more=False,
             )
-        
-        # Sort and take next 5
-        all_candidates.sort(key=lambda x: (-x.get("confidence", 0.0), x.get("rank", 999)))
-        next_batch = all_candidates[:5]
-        
-        # Create seeds file for this batch
-        seeds_path = OUTPUT_DIR / "chosen_seeds.ndjson"
-        with open(seeds_path, 'w', encoding='utf-8') as f:
+
+        candidates.sort(key=lambda x: (-x.get("confidence", 0.0), x.get("rank", 999)))
+        next_batch = candidates[:5]
+
+        seeds_path = work_dir / "chosen_seeds.ndjson"
+        with open(seeds_path, "w", encoding="utf-8") as f:
             for candidate in next_batch:
-                seed = {
+                f.write(json.dumps({
                     "url": candidate["url"],
                     "label": candidate.get("label", "highly_relevant"),
                     "title": candidate.get("title", candidate["url"]),
-                    "source_query": candidate.get("source_query", "auto_selected")
-                }
-                f.write(json.dumps(seed, ensure_ascii=False) + '\n')
-        
-        # Build user_request for scraping (use topic directly, like terminal)
-        user_request = request.topic if request.topic else "Extract a general profile of each entity."
-        
-        # Modify PARSER_INSTRUCTIONS if data_specification provided (but don't duplicate topic)
-        custom_instructions = None
-        if request.data_specification and request.data_specification != request.topic:
-            custom_instructions = PARSER_INSTRUCTIONS + f"\n\nIMPORTANT: The user specifically wants to extract: {request.data_specification}. Make sure to prioritize and extract this information prominently. If this information is not found on the page, set the relevant field(s) to null but ensure you thoroughly search for it."
-        
-        # Scrape this batch (append to existing file)
-        temp_output_path = OUTPUT_DIR / "discovered_sites_temp.ndjson"
+                    "source_query": candidate.get("source_query", "auto_selected"),
+                }, ensure_ascii=False) + "\n")
+
+        user_request = request.topic or "Extract a general profile of each entity."
+        custom_instructions = _build_custom_instructions(request, PARSER_INSTRUCTIONS)
+
+        batch_output_path = work_dir / "discovered_sites_more.ndjson"
         llm_scrape_from_seeds(
             seeds_path=str(seeds_path),
-            output_path=str(temp_output_path),
-            delay_seconds=0.0,  # No delay needed with parallel processing
+            output_path=str(batch_output_path),
+            delay_seconds=0.0,
             user_request=user_request,
             custom_parser_instructions=custom_instructions,
-            max_workers=10,  # Parallel HTML fetching
-            llm_workers=10  # More parallel LLM workers for faster processing
+            max_workers=10,
+            llm_workers=10,
         )
-        
-        # Append new results to existing discovered_sites.ndjson
-        new_results = []
-        if temp_output_path.exists():
-            with open(temp_output_path, 'r', encoding='utf-8') as f:
-                for line in f:
-                    if line.strip():
-                        new_results.append(json.loads(line))
-            
-            # Append to main file
-            with open(discovered_sites_path, 'a', encoding='utf-8') as f:
-                for result in new_results:
-                    f.write(json.dumps(result, ensure_ascii=False) + '\n')
-            
-            # Clean up temp file
-            temp_output_path.unlink()
-        
-        # Calculate remaining
-        remaining_count = len(all_candidates) - len(next_batch)
-        
+
+        new_results = _load_ndjson_results(batch_output_path)
+        runs_repo.save_results(db, run_id, new_results)
+
+        remaining_count = len(candidates) - len(next_batch)
         return ScrapeResponse(
             results=new_results,
+            run_id=run_id,
             message=f"Scraped {len(next_batch)} more URLs. {remaining_count} links remaining.",
-            total_available_links=len(all_candidates),
+            total_available_links=len(candidates),
             scraped_count=len(new_results),
-            has_more=(remaining_count > 0)
+            has_more=(remaining_count > 0),
         )
     except HTTPException:
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-# Auto-generate routes for all tables
-@app.on_event("startup")
-async def startup_event():
-    """Generate API routes automatically on startup with fresh schema introspection"""
-    # DISABLED: Auto-generation disabled per user request
-    print("ℹ️  Auto-generation of API routes is disabled")
-    return
-    
-    db = None
+
+@app.get("/scraper/runs/{run_id}")
+def get_run_results(run_id: int, db: Session = Depends(get_db)):
+    """Fetch persisted results for a previous run."""
     try:
-        # Try to connect to database
-        print("🔄 Attempting to connect to database...")
-        engine = get_engine()
-        
-        # Test connection first
-        try:
-            engine.dispose()
-            db = next(get_db())
-            # Test query
-            db.execute(text("SELECT 1"))
-            print("   ✅ Database connection successful")
-        except Exception as db_error:
-            print(f"   ⚠️  Database not available: {db_error}")
-            print("   ℹ️  App will run in scraper-only mode (database endpoints disabled)")
-            return  # Exit early, scraper endpoints will still work
-        
-        # Ensure schema migrations are applied (e.g., extracted_at columns)
-        # This ensures new columns added via migration files are present
-        try:
-            print("🔄 Checking and applying schema migrations...")
-            # Run migration to add extracted_at columns if they don't exist
-            # This is safe because it uses IF NOT EXISTS
-            migration_sql = """
-            ALTER TABLE core.publishers ADD COLUMN IF NOT EXISTS extracted_at TIMESTAMPTZ DEFAULT now();
-            ALTER TABLE core.magazines ADD COLUMN IF NOT EXISTS extracted_at TIMESTAMPTZ DEFAULT now();
-            ALTER TABLE core.agents ADD COLUMN IF NOT EXISTS extracted_at TIMESTAMPTZ DEFAULT now();
-            """
-            db.execute(text(migration_sql))
-            db.commit()
-            print("   ✅ Schema migrations applied")
-        except Exception as e:
-            print(f"   ⚠️  Migration check failed (may already be applied): {e}")
-            db.rollback()
-        
-        print("🔄 Introspecting database schema...")
-        # Generate routers for all tables (this will introspect fresh schema)
-        auto_routers = auto_generate_all_routers(db)
-        
-        # Include auto-generated routers
-        for router in auto_routers:
-            app.include_router(router)
-        
-        print(f"✅ Auto-generated {len(auto_routers)} API routers")
-        for router in auto_routers:
-            print(f"   - {router.prefix}")
-        
+        results = runs_repo.get_results(db, run_id)
+        return {"run_id": run_id, "results": results, "count": len(results)}
     except Exception as e:
-        import traceback
-        print(f"⚠️  Warning: Auto-generation failed: {e}")
-        print(f"   Full error: {traceback.format_exc()}")
-        print("   ℹ️  App will run in scraper-only mode (database endpoints disabled)")
-        # Fall back to manual routers only - scraper endpoints still work
-    finally:
-        # Always close the database session
-        if db:
-            try:
-                db.close()
-            except:
-                pass
+        raise HTTPException(status_code=500, detail=str(e))

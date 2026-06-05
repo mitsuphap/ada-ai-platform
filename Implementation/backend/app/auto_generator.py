@@ -1,5 +1,6 @@
 # app/auto_generator.py
 import os
+import logging
 from typing import Dict, List, Type, Any, Optional, Set, Callable
 from sqlalchemy import MetaData, Table, Column, inspect
 from sqlalchemy.orm import Session
@@ -10,6 +11,8 @@ from app.db import get_db
 from slowapi import Limiter 
 from slowapi.util import get_remote_address
 import re
+
+logger = logging.getLogger("ada.auto_generator")
 
 # Create limiter instance
 limiter = Limiter(key_func=get_remote_address)
@@ -134,10 +137,9 @@ class DatabaseIntrospector:
         
         primary_key = pk_columns['constrained_columns'][0] if pk_columns['constrained_columns'] else None
         
-        # Debug: print detected columns for troubleshooting
         column_names = [col['name'] for col in columns]
         schema_prefix = f"{schema_name}." if not is_sqlite else ""
-        print(f"   📋 Detected columns for {schema_prefix}{table_name}: {', '.join(column_names)}")
+        logger.debug("Detected columns for %s%s: %s", schema_prefix, table_name, ", ".join(column_names))
         
         return {
             "table_name": table_name,
@@ -370,8 +372,15 @@ class AutoAPIGenerator:
                 
                 where_sql = " AND ".join(where_conditions)
                 
-                # Build ORDER BY clause
-                sort_field = sort.lstrip("-") if sort else table_info['primary_key']
+                # Build ORDER BY clause.
+                # SECURITY: `sort` is user-controlled, so it must never be interpolated
+                # into SQL without validation. Whitelist against the table's real columns.
+                valid_columns = {col['name'] for col in table_info['columns']}
+                requested_sort = sort.lstrip("-") if sort else None
+                if requested_sort and requested_sort in valid_columns:
+                    sort_field = requested_sort
+                else:
+                    sort_field = table_info['primary_key']
                 order_dir = "DESC" if sort and sort.startswith("-") else "ASC"
                 order_by_sql = f"{sort_field} {order_dir}"
                 
@@ -395,11 +404,6 @@ class AutoAPIGenerator:
                 """
                 
                 rows = db.execute(text(sql), params).mappings().all()
-                
-                # Debug: Log what columns are actually in the database result
-                if rows:
-                    first_row_keys = list(dict(rows[0]).keys())
-                    print(f"   🔍 DEBUG: Raw database columns for {table_name}: {first_row_keys}")
                 
                 # Convert rows to response items - merge Pydantic model with raw DB data
                 # This ensures ALL fields from database are included, even if not in schema
@@ -429,7 +433,7 @@ class AutoAPIGenerator:
                         items.append(merged_dict)
                     except Exception as e:
                         # If Pydantic fails, just return raw database data
-                        print(f"   ⚠️  Pydantic validation failed for {table_name}: {e}")
+                        logger.warning("Pydantic validation failed for %s: %s", table_name, e)
                         items.append(row_dict)
                 
                 return {
@@ -479,7 +483,7 @@ class AutoAPIGenerator:
                     return {**item_dict, **row_dict}
                 except Exception as e:
                     # Fallback to raw data if Pydantic fails
-                    print(f"   ⚠️  Pydantic validation failed: {e}")
+                    logger.warning("Pydantic validation failed: %s", e)
                     return row_dict
                 
             except HTTPException:
@@ -542,7 +546,7 @@ class AutoAPIGenerator:
                     # Merge to ensure all DB fields are included
                     return {**item_dict, **result_dict}
                 except Exception as e:
-                    print(f"   ⚠️  Pydantic validation failed: {e}")
+                    logger.warning("Pydantic validation failed: %s", e)
                     return result_dict
                 
             except Exception as e:
@@ -608,7 +612,7 @@ class AutoAPIGenerator:
                     # Merge to ensure all DB fields are included
                     return {**item_dict, **result_dict}
                 except Exception as e:
-                    print(f"   ⚠️  Pydantic validation failed: {e}")
+                    logger.warning("Pydantic validation failed: %s", e)
                     return result_dict
                 
             except HTTPException:
@@ -658,7 +662,7 @@ def auto_generate_all_routers(db_session: Session) -> List[APIRouter]:
             router = generator.generate_crud_router(table)
             routers.append(router)
         except Exception as e:
-            print(f"Warning: Could not generate router for {table}: {e}")
+            logger.warning("Could not generate router for %s: %s", table, e)
     
     return routers
 

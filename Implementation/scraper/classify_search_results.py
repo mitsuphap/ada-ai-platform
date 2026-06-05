@@ -78,7 +78,7 @@ KEEP_LABELS = [
     "somewhat_relevant",
 ]  # or set to None to keep everything
 
-MIN_CONFIDENCE = 0.95  # keep only high confidence results
+MIN_CONFIDENCE = float(os.getenv("MIN_CONFIDENCE", "0.95"))  # keep only high confidence results (configurable)
 
 # NEW: optional batch size guard after strict filtering
 MAX_PER_QUERY_AFTER_FILTER = 15  # keep top N per source query to reduce noise
@@ -332,9 +332,7 @@ if __name__ == "__main__":
     if run_context_path.exists():
         try:
             request_user = json.load(open(run_context_path, "r", encoding="utf-8")).get("user_request", "")
-            if request_user:
-                print(f"[DEBUG] Loaded run_context.json from {run_context_path}")
-        except:
+        except Exception:
             pass
     if not request_user:
         request_user = input("Enter the SAME user request you searched with: ").strip()

@@ -33,6 +33,7 @@ export default function Scraper() {
   const [totalAvailableLinks, setTotalAvailableLinks] = useState<number | null>(null)
   const [hasMoreLinks, setHasMoreLinks] = useState(false)
   const [scrapingMore, setScrapingMore] = useState(false)
+  const [runId, setRunId] = useState<number | null>(null)
 
   // Flexible function to detect what fields user wants from their free-form input
   const detectRequestedFields = (dataSpec: string): string[] => {
@@ -150,6 +151,7 @@ export default function Scraper() {
     setScrapedData([])
     setTotalAvailableLinks(null)
     setHasMoreLinks(false)
+    setRunId(null)
 
     try {
       // Use the automatic endpoint that does: search -> classify -> filter (confidence >= 0.95) -> scrape all filtered results
@@ -159,6 +161,7 @@ export default function Scraper() {
       })
 
       setScrapedData(response.data.results)
+      setRunId(response.data.run_id ?? null)
       setTotalAvailableLinks(response.data.total_available_links || null)
       setHasMoreLinks(response.data.has_more || false)
       setStep('scraped') // Skip the results selection step, go directly to scraped data
@@ -185,7 +188,8 @@ export default function Scraper() {
     try {
       const response = await api.post('/scraper/scrape-more', {
         topic: topic.trim(),
-        data_specification: null  // Don't duplicate topic
+        data_specification: null,  // Don't duplicate topic
+        run_id: runId
       })
 
       // Append new results to existing scraped data
@@ -257,11 +261,11 @@ export default function Scraper() {
       <div>
         <h1 className="text-3xl sm:text-4xl font-semibold tracking-tight">
           <span className="bg-gradient-to-r from-[#5E60F8] to-[#D946EF] bg-clip-text text-transparent">
-            Web Scraper
+            Contact Finder
           </span>
         </h1>
         <p className="mt-2 text-sm sm:text-base text-[#64748B]">
-          Search for data from any industry and extract structured information
+          Find leadership contacts (VPs, provost, president) at a university and extract structured data
         </p>
       </div>
 
@@ -270,7 +274,7 @@ export default function Scraper() {
         <div className="bg-white rounded-2xl shadow-sm border border-slate-200 p-6 sm:p-8 space-y-6">
           <div>
             <label htmlFor="topic" className="block text-sm font-medium text-[#0F172A] mb-2">
-              Topic / Search Prompt *
+              Who are you looking for? *
             </label>
             <input
               id="topic"
@@ -282,12 +286,12 @@ export default function Scraper() {
                   handleSearch()
                 }
               }}
-              placeholder="e.g., restaurants in Vancouver with phone number and address"
+              placeholder="e.g., email addresses of VPs at Douglas College"
               className="w-full px-4 py-3 border border-slate-300 rounded-lg focus:ring-2 focus:ring-[#5E60F8] focus:border-[#5E60F8] transition-colors"
               disabled={loading}
             />
             <p className="mt-1 text-sm text-[#64748B]">
-              Describe what you're searching for and include the data fields you want extracted (e.g., phone number, email, address, contact info)
+              Describe who you're looking for and the contact fields you want (e.g., name, title, email, phone). Tip: name a specific institution for best accuracy.
             </p>
           </div>
 
@@ -456,6 +460,7 @@ export default function Scraper() {
                   setScrapedData([])
                   setTotalAvailableLinks(null)
                   setHasMoreLinks(false)
+                  setRunId(null)
                 }}
                 className="text-sm text-[#5E60F8] hover:text-[#D946EF] font-medium transition-colors"
               >

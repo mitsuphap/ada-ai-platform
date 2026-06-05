@@ -51,6 +51,11 @@ wheels/
 MANIFEST
 *.pyc
 
+# The generic "lib/" above is a Python build artifact; do not let it swallow
+# the frontend source lib folder.
+!Implementation/frontend/src/lib/
+!Implementation/frontend/src/lib/**
+
 # ============================
 # NODE MODULES (for your frontend)
 # ============================
